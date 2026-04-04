@@ -1,12 +1,12 @@
 {
-  "name": "Last.fm Time Traveller",
+  "name": "Last.fm Time Traveler",
   "image": "mcr.microsoft.com/devcontainers/python:3.12",
-  "postCreateCommand": "python -m venv .venv && .venv/bin/pip install -r requirements.txt",
+  "postCreateCommand": "pip install -r requirements.txt",
   "customizations": {
     "vscode": {
       "settings": {
-        "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
-        "python.terminal.activateEnvironment": true
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.terminal.activateEnvironment": false
       },
       "extensions": [
         "ms-python.python",
@@ -17,7 +17,7 @@
   "forwardPorts": [5000],
   "portsAttributes": {
     "5000": {
-      "label": "Last.fm Time Traveller",
+      "label": "Last.fm Time Traveler",
       "onAutoForward": "openBrowser"
     }
   }

@@ -1,4 +1,4 @@
-# Last.fm Time Traveller — Session Plan
+# Last.fm Time Traveler — Session Plan
 
 ## Project Overview
 A web app that lets you find the very first time you listened to any song on Last.fm. Type a song title, get autocomplete suggestions, pick one, and see when you first scrobbled it.

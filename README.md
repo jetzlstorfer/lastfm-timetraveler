@@ -1,4 +1,4 @@
-# 🕰️ Last.fm Time Traveller
+# 🕰️ Last.fm Time Traveler
 
 Find the very first time you listened to any song on Last.fm.
 
