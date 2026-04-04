@@ -219,11 +219,57 @@
     }
 
     footer a { color: #d51007; text-decoration: none; }
+
+    /* Config error banner */
+    .config-banner {
+      width: min(90vw, 480px);
+      background: rgba(213, 16, 7, 0.12);
+      border: 1px solid rgba(213, 16, 7, 0.35);
+      border-radius: 12px;
+      padding: 18px 22px;
+      margin-bottom: 2rem;
+      display: none;
+      animation: slideUp 0.4s ease;
+    }
+
+    .config-banner.show { display: block; }
+
+    .config-banner .banner-title {
+      font-weight: 700;
+      font-size: 0.95rem;
+      color: #ff6b6b;
+      margin-bottom: 6px;
+    }
+
+    .config-banner .banner-msg {
+      font-size: 0.88rem;
+      color: #ccc;
+      line-height: 1.5;
+    }
+
+    .config-banner code {
+      background: rgba(255,255,255,0.08);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.82rem;
+    }
+
+    .album-name {
+      font-size: 0.85rem;
+      color: #888;
+      margin-top: 3px;
+      font-style: italic;
+    }
   </style>
 </head>
 <body>
   <h1>🕰️ Last.fm Time Traveller</h1>
   <p class="subtitle">Find the very first time you listened to a song</p>
+
+  <div id="config-banner" class="config-banner">
+    <div class="banner-title">⚠️ Configuration needed</div>
+    <div class="banner-msg" id="banner-msg"></div>
+  </div>
 
   <div class="search-container">
     <input id="search" type="text" placeholder="Start typing a song title…" autocomplete="off" />
@@ -242,10 +288,32 @@
     const acList = document.getElementById('ac-list');
     const resultCard = document.getElementById('result');
     const spinner = document.getElementById('spinner');
+    const configBanner = document.getElementById('config-banner');
+    const bannerMsg = document.getElementById('banner-msg');
 
     let debounceTimer = null;
     let activeIdx = -1;
     let currentResults = [];
+    let configOk = false;
+
+    // Check API config on load
+    (async () => {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        if (!data.ok) {
+          bannerMsg.innerHTML = data.error;
+          configBanner.classList.add('show');
+          searchInput.disabled = true;
+          searchInput.placeholder = 'Fix configuration first…';
+        } else {
+          configOk = true;
+        }
+      } catch {
+        bannerMsg.textContent = 'Could not reach the server.';
+        configBanner.classList.add('show');
+      }
+    })();
 
     // Debounced autocomplete search
     searchInput.addEventListener('input', () => {
@@ -355,6 +423,7 @@
             <div class="result-meta">
               <h2>${escHtml(data.track)}</h2>
               <div class="artist-name">${escHtml(data.artist)}</div>
+              ${data.album ? `<div class="album-name">${escHtml(data.album)}</div>` : ''}
             </div>
           </div>
           <div class="result-body">

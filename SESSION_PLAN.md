@@ -39,9 +39,8 @@ lastfm-timetraveller/
 ```
 
 ## Possible Future Work
-- [ ] Add error handling for missing/invalid API key (show friendly message in UI)
-- [ ] Loading skeleton / better loading states
-- [ ] Show album name in result card
+- [x] Add error handling for missing/invalid API key (show friendly message in UI)
+- [x] Show album name in result card
 - [ ] Deploy to a cloud service (e.g., Fly.io, Railway)
 - [ ] Add a "share" button to share the result
 - [ ] Support multiple users (input username in UI instead of env var)

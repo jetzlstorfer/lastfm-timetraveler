@@ -24,6 +24,21 @@ def index():
     return send_from_directory("static", "index.html")
 
 
+@app.route("/api/status")
+def status():
+    """Health check — verifies API key and username are configured and valid."""
+    if not LASTFM_API_KEY or LASTFM_API_KEY == "your_api_key_here":
+        return jsonify({"ok": False, "error": "LASTFM_API_KEY is not set. Copy .env.example to .env and add your key."}), 200
+    if not LASTFM_USERNAME or LASTFM_USERNAME == "your_lastfm_username_here":
+        return jsonify({"ok": False, "error": "LASTFM_USERNAME is not set. Add your Last.fm username to .env."}), 200
+    try:
+        data = lastfm_get("user.getInfo", user=LASTFM_USERNAME)
+        user = data.get("user", {}).get("name", LASTFM_USERNAME)
+        return jsonify({"ok": True, "username": user})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Last.fm API error: {exc}"}), 200
+
+
 @app.route("/api/search")
 def search_tracks():
     """Autocomplete: search Last.fm tracks by name."""
@@ -112,14 +127,14 @@ def first_listen():
     oldest = page_tracks[-1]
     date_info = oldest.get("date", {})
 
-    # Fetch track info for album art
+    # Fetch track info for album art and album name
     image_url = ""
+    album_name = ""
     try:
         info = lastfm_get("track.getInfo", track=track, artist=artist)
-        album_images = (
-            info.get("track", {}).get("album", {}).get("image", [])
-        )
-        for img in album_images:
+        album_data = info.get("track", {}).get("album", {})
+        album_name = album_data.get("title", "")
+        for img in album_data.get("image", []):
             if img.get("size") == "extralarge" and img.get("#text"):
                 image_url = img["#text"]
     except Exception:
@@ -132,6 +147,7 @@ def first_listen():
             "artist": oldest.get("artist", {}).get("#text", artist)
             if isinstance(oldest.get("artist"), dict)
             else artist,
+            "album": album_name,
             "date": date_info.get("#text", "Unknown"),
             "timestamp": date_info.get("uts", ""),
             "total_scrobbles": total,
