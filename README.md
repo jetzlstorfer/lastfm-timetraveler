@@ -18,11 +18,17 @@ Type a song title, pick from the autocomplete suggestions, and discover when you
 
 3. **Install & run**:
    ```bash
+   python -m venv .venv
+   source .venv/bin/activate   # Windows: .venv\Scripts\activate
    pip install -r requirements.txt
    python app.py
    ```
 
 4. Open http://localhost:5000
+
+### Dev Container
+
+Open this repo in VS Code with the Dev Containers extension — it will auto-create the venv and install dependencies.
 
 ## How it works
 
