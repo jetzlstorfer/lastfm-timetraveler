@@ -2,10 +2,14 @@ import os
 import requests
 from flask import Flask, jsonify, request, send_from_directory
 from dotenv import load_dotenv
+import database as db
 
 load_dotenv()
 
 app = Flask(__name__, static_folder="static")
+
+with app.app_context():
+    db.init_db()
 
 LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
 LASTFM_USERNAME = os.getenv("LASTFM_USERNAME")
@@ -96,6 +100,24 @@ def first_listen():
     artist = request.args.get("artist", "").strip()
     if not track or not artist:
         return jsonify({"error": "track and artist are required"}), 400
+
+    # Return cached result immediately if available (first-listen date never changes)
+    if LASTFM_USERNAME:
+        cached = db.get_cached(LASTFM_USERNAME, track, artist)
+        if cached:
+            return jsonify(
+                {
+                    "found": True,
+                    "track": cached["track"],
+                    "artist": cached["artist"],
+                    "album": cached["album"] or "",
+                    "date": cached["first_listen_date"],
+                    "timestamp": cached["first_listen_timestamp"],
+                    "total_scrobbles": cached["total_scrobbles"],
+                    "image": cached["image"] or "",
+                    "cached": True,
+                }
+            )
 
     # Step 1: Check total play count via track.getInfo (fast, single call)
     try:
@@ -216,6 +238,19 @@ def first_listen():
         exact_date = dt.strftime("%d %b %Y, %H:%M")
         exact_ts = str(week_from)
 
+    # Persist the result so future queries are served from the local cache
+    if LASTFM_USERNAME:
+        db.save_result(
+            LASTFM_USERNAME,
+            canonical_track,
+            canonical_artist,
+            album_name,
+            exact_date,
+            exact_ts,
+            total,
+            image_url,
+        )
+
     return jsonify(
         {
             "found": True,
@@ -227,6 +262,28 @@ def first_listen():
             "total_scrobbles": total,
             "image": image_url,
         }
+    )
+
+
+@app.route("/api/history")
+def history():
+    """Return all previously resolved first-listen results for the configured user."""
+    username = request.args.get("username", LASTFM_USERNAME)
+    results = db.get_history(username)
+    return jsonify(
+        [
+            {
+                "track": r["track"],
+                "artist": r["artist"],
+                "album": r["album"] or "",
+                "date": r["first_listen_date"],
+                "timestamp": r["first_listen_timestamp"],
+                "total_scrobbles": r["total_scrobbles"],
+                "image": r["image"] or "",
+                "queried_at": r["queried_at"],
+            }
+            for r in results
+        ]
     )
 
 

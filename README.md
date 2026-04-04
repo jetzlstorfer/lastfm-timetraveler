@@ -33,5 +33,16 @@ Open this repo in VS Code with the Dev Containers extension — it will auto-cre
 ## How it works
 
 - **Autocomplete** uses Last.fm's `track.search` API
-- **First listen** uses `user.getArtistTracks` to paginate to the oldest scrobble of the selected track
+- **First listen** uses a binary search over `user.getWeeklyTrackChart` to locate the earliest week, then `user.getRecentTracks` to find the exact scrobble date
+- **Caching** — resolved first-listen results are stored in a local SQLite database (`timetraveler.db`). Repeated queries for the same track are served instantly from the cache without hitting the Last.fm API again
+- **History** — the `/api/history` endpoint returns all previously resolved lookups for the configured user
 - Built with **Flask** (backend) and vanilla **HTML/CSS/JS** (frontend)
+
+### Database
+
+The app creates `timetraveler.db` automatically on first run. The path can be overridden with the `DB_PATH` environment variable (useful for testing or custom deployments).
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/history` | All cached first-listen results for the configured user |
+| `GET /api/history?username=<user>` | Results for a specific username |
