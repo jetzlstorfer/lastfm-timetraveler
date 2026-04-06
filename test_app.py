@@ -141,13 +141,10 @@ def _search_response(tracks):
 
 class TestStatus:
     @patch.object(app_module, "LASTFM_API_KEY", "valid_key")
-    @patch.object(app_module, "LASTFM_USERNAME", "testuser")
-    @patch.object(app_module, "lastfm_get", return_value=_user_info_response("testuser"))
-    def test_status_ok(self, mock_get, client):
+    def test_status_ok(self, client):
         resp = client.get("/api/status")
         data = resp.get_json()
         assert data["ok"] is True
-        assert data["username"] == "testuser"
 
     @patch.object(app_module, "LASTFM_API_KEY", "")
     def test_status_missing_api_key(self, client):
@@ -155,14 +152,6 @@ class TestStatus:
         data = resp.get_json()
         assert data["ok"] is False
         assert "LASTFM_API_KEY" in data["error"]
-
-    @patch.object(app_module, "LASTFM_API_KEY", "valid_key")
-    @patch.object(app_module, "LASTFM_USERNAME", "")
-    def test_status_missing_username(self, client):
-        resp = client.get("/api/status")
-        data = resp.get_json()
-        assert data["ok"] is False
-        assert "LASTFM_USERNAME" in data["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -202,16 +191,19 @@ class TestFirstListen:
         resp = client.get("/api/first-listen")
         assert resp.status_code == 400
 
-        resp = client.get("/api/first-listen?track=Hello")
+        resp = client.get("/api/first-listen?track=Hello&username=testuser")
         assert resp.status_code == 400
 
-        resp = client.get("/api/first-listen?artist=Adele")
+        resp = client.get("/api/first-listen?artist=Adele&username=testuser")
+        assert resp.status_code == 400
+
+        resp = client.get("/api/first-listen?track=Hello&artist=Adele")
         assert resp.status_code == 400
 
     @patch.object(app_module, "lastfm_get")
     def test_never_listened_track(self, mock_get, client):
         mock_get.return_value = _track_info_response(userplaycount=0)
-        resp = client.get("/api/first-listen?track=Unknown&artist=Nobody")
+        resp = client.get("/api/first-listen?track=Unknown&artist=Nobody&username=testuser")
         data = resp.get_json()
         assert data["found"] is False
         assert "never" in data["message"].lower()
@@ -244,7 +236,7 @@ class TestFirstListen:
             return {}
 
         mock_get.side_effect = fake_lastfm_get
-        resp = client.get("/api/first-listen?track=TestTrack&artist=TestArtist")
+        resp = client.get("/api/first-listen?track=TestTrack&artist=TestArtist&username=testuser")
         data = resp.get_json()
 
         assert data["found"] is True
@@ -275,7 +267,7 @@ class TestFirstListen:
             return {}
 
         mock_get.side_effect = fake_lastfm_get
-        resp = client.get("/api/first-listen?track=Song&artist=Band")
+        resp = client.get("/api/first-listen?track=Song&artist=Band&username=testuser")
         data = resp.get_json()
 
         assert data["found"] is True
@@ -304,7 +296,7 @@ class TestFirstListen:
             return {}
 
         mock_get.side_effect = fake_lastfm_get
-        resp = client.get("/api/first-listen?track=X&artist=Y")
+        resp = client.get("/api/first-listen?track=X&artist=Y&username=testuser")
         data = resp.get_json()
 
         assert data["found"] is True
@@ -315,7 +307,7 @@ class TestFirstListen:
     def test_track_getinfo_http_error_returns_502(self, mock_get, client):
         import requests as req
         mock_get.side_effect = req.HTTPError("503 Server Error")
-        resp = client.get("/api/first-listen?track=A&artist=B")
+        resp = client.get("/api/first-listen?track=A&artist=B&username=testuser")
         assert resp.status_code == 502
 
     @patch.object(app_module, "lastfm_get")
@@ -338,7 +330,7 @@ class TestFirstListen:
             return {}
 
         mock_get.side_effect = fake_lastfm_get
-        resp = client.get("/api/first-listen?track=Only&artist=One")
+        resp = client.get("/api/first-listen?track=Only&artist=One&username=testuser")
         data = resp.get_json()
 
         assert data["found"] is True
@@ -366,7 +358,7 @@ class TestFirstListen:
             return {}
 
         mock_get.side_effect = fake_lastfm_get
-        resp = client.get("/api/first-listen?track=My+Song&artist=The+Band")
+        resp = client.get("/api/first-listen?track=My+Song&artist=The+Band&username=testuser")
         data = resp.get_json()
         assert data["found"] is True
 

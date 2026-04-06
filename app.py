@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone, timedelta
 import requests
 from flask import Flask, jsonify, request, send_from_directory
 from dotenv import load_dotenv
@@ -12,7 +13,6 @@ with app.app_context():
     db.init_db()
 
 LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
-LASTFM_USERNAME = os.getenv("LASTFM_USERNAME")
 LASTFM_BASE = "https://ws.audioscrobbler.com/2.0/"
 
 
@@ -30,17 +30,148 @@ def index():
 
 @app.route("/api/status")
 def status():
-    """Health check — verifies API key and username are configured and valid."""
+    """Health check — verifies API key is configured."""
     if not LASTFM_API_KEY or LASTFM_API_KEY == "your_api_key_here":
         return jsonify({"ok": False, "error": "LASTFM_API_KEY is not set. Copy .env.example to .env and add your key."}), 200
-    if not LASTFM_USERNAME or LASTFM_USERNAME == "your_lastfm_username_here":
-        return jsonify({"ok": False, "error": "LASTFM_USERNAME is not set. Add your Last.fm username to .env."}), 200
+    return jsonify({"ok": True})
+
+
+@app.route("/api/user/validate")
+def validate_user():
+    """Validate a Last.fm username and return profile info."""
+    username = request.args.get("username", "").strip()
+    if not username:
+        return jsonify({"ok": False, "error": "Username is required."}), 400
     try:
-        data = lastfm_get("user.getInfo", user=LASTFM_USERNAME)
-        user = data.get("user", {}).get("name", LASTFM_USERNAME)
-        return jsonify({"ok": True, "username": user})
+        data = lastfm_get("user.getInfo", user=username)
+        user = data.get("user", {})
+        image_url = ""
+        for img in user.get("image", []):
+            if img.get("size") == "medium" and img.get("#text"):
+                image_url = img["#text"]
+        reg = user.get("registered", {})
+        if isinstance(reg, dict):
+            reg_text = reg.get("#text", "")
+            reg_ts = reg.get("unixtime", "")
+        else:
+            reg_text = ""
+            reg_ts = str(reg)
+        if not reg_text and reg_ts:
+            try:
+                reg_date = datetime.fromtimestamp(int(reg_ts), tz=timezone.utc)
+                reg_text = reg_date.strftime("%B %Y")
+            except (ValueError, OSError):
+                reg_text = ""
+        return jsonify({
+            "ok": True,
+            "username": user.get("name", username),
+            "playcount": int(user.get("playcount", 0)),
+            "registered": reg_text,
+            "image": image_url,
+        })
+    except requests.HTTPError:
+        return jsonify({"ok": False, "error": f"User '{username}' not found on Last.fm."}), 200
     except Exception as exc:
         return jsonify({"ok": False, "error": f"Last.fm API error: {exc}"}), 200
+
+
+@app.route("/api/user/top-tracks")
+def user_top_tracks():
+    """Get a user's top tracks for suggestions."""
+    username = request.args.get("username", "").strip()
+    period = request.args.get("period", "1month")  # overall, 7day, 1month, 3month, 6month, 12month
+    if not username:
+        return jsonify({"error": "username is required"}), 400
+    try:
+        data = lastfm_get("user.getTopTracks", user=username, period=period, limit=8)
+        tracks = data.get("toptracks", {}).get("track", [])
+        results = []
+        for t in tracks:
+            image_url = ""
+            for img in t.get("image", []):
+                if img.get("size") == "medium" and img.get("#text"):
+                    image_url = img["#text"]
+            results.append({
+                "name": t.get("name", ""),
+                "artist": t.get("artist", {}).get("name", ""),
+                "image": image_url,
+                "playcount": int(t.get("playcount", 0)),
+            })
+        return jsonify(results)
+    except Exception:
+        return jsonify([])
+
+
+@app.route("/api/on-this-day")
+def on_this_day():
+    """Find what the user was listening to on this day 1, 5, and 10 years ago."""
+    username = request.args.get("username", "").strip()
+    if not username:
+        return jsonify({"error": "username is required"}), 400
+
+    now = datetime.now(timezone.utc)
+    periods = []
+    for years_ago in [1, 2, 3, 5, 10]:
+        try:
+            target = now.replace(year=now.year - years_ago)
+        except ValueError:
+            # Feb 29 edge case
+            target = now.replace(year=now.year - years_ago, day=28)
+        day_start = target.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+        from_ts = int(day_start.timestamp())
+        to_ts = int(day_end.timestamp())
+
+        try:
+            data = lastfm_get(
+                "user.getRecentTracks",
+                user=username,
+                limit=50,
+                **{"from": str(from_ts), "to": str(to_ts)},
+            )
+            scrobbles = data.get("recenttracks", {}).get("track", [])
+            if isinstance(scrobbles, dict):
+                scrobbles = [scrobbles]
+            # Filter out "now playing" entries
+            scrobbles = [s for s in scrobbles if not s.get("@attr", {}).get("nowplaying")]
+
+            # Count plays per track, keep order of first appearance
+            seen = {}
+            track_list = []
+            for s in scrobbles:
+                s_artist = s.get("artist", {})
+                artist_name = s_artist.get("#text", "") if isinstance(s_artist, dict) else str(s_artist)
+                key = (s.get("name", "").lower(), artist_name.lower())
+                if key not in seen:
+                    image_url = ""
+                    for img in s.get("image", []):
+                        if img.get("size") == "medium" and img.get("#text"):
+                            image_url = img["#text"]
+                    seen[key] = len(track_list)
+                    track_list.append({
+                        "name": s.get("name", ""),
+                        "artist": artist_name,
+                        "image": image_url,
+                        "plays": 1,
+                    })
+                else:
+                    track_list[seen[key]]["plays"] += 1
+
+            # Sort by plays descending, take top 5
+            track_list.sort(key=lambda x: x["plays"], reverse=True)
+            top = track_list[:5]
+
+            if top:
+                periods.append({
+                    "years_ago": years_ago,
+                    "date": day_start.strftime("%B %d, %Y"),
+                    "tracks": top,
+                    "total_scrobbles": len(scrobbles),
+                })
+        except Exception:
+            continue
+
+    return jsonify(periods)
 
 
 @app.route("/api/search")
@@ -72,11 +203,11 @@ def search_tracks():
     return jsonify(results)
 
 
-def _track_in_chart_range(from_ts, to_ts, track, artist):
+def _track_in_chart_range(username, from_ts, to_ts, track, artist):
     """Check if a track appears in the user's weekly chart for a time range."""
     data = lastfm_get(
         "user.getWeeklyTrackChart",
-        user=LASTFM_USERNAME,
+        user=username,
         **{"from": str(from_ts), "to": str(to_ts)},
     )
     tracks = data.get("weeklytrackchart", {}).get("track", [])
@@ -95,11 +226,12 @@ def _track_in_chart_range(from_ts, to_ts, track, artist):
 
 @app.route("/api/first-listen")
 def first_listen():
-    """Find the very first scrobble of a track for the configured user."""
+    """Find the very first scrobble of a track for the given user."""
     track = request.args.get("track", "").strip()
     artist = request.args.get("artist", "").strip()
-    if not track or not artist:
-        return jsonify({"error": "track and artist are required"}), 400
+    username = request.args.get("username", "").strip()
+    if not track or not artist or not username:
+        return jsonify({"error": "track, artist, and username are required"}), 400
 
     # Return cached result immediately if available (first-listen date never changes)
     if LASTFM_USERNAME:
@@ -122,7 +254,7 @@ def first_listen():
     # Step 1: Check total play count via track.getInfo (fast, single call)
     try:
         info = lastfm_get(
-            "track.getInfo", track=track, artist=artist, username=LASTFM_USERNAME
+            "track.getInfo", track=track, artist=artist, username=username
         )
     except requests.HTTPError:
         return jsonify({"error": "Last.fm API error"}), 502
@@ -155,7 +287,7 @@ def first_listen():
 
     # Step 2: Binary search weekly charts to find the earliest week
     try:
-        chart_list = lastfm_get("user.getWeeklyChartList", user=LASTFM_USERNAME)
+        chart_list = lastfm_get("user.getWeeklyChartList", user=username)
     except requests.HTTPError:
         return jsonify({"error": "Last.fm API error"}), 502
 
@@ -169,7 +301,7 @@ def first_listen():
     while lo < hi:
         mid = (lo + hi) // 2
         mid_to = int(weeks[mid]["to"])
-        if _track_in_chart_range(first_from, mid_to, canonical_track, canonical_artist):
+        if _track_in_chart_range(username, first_from, mid_to, canonical_track, canonical_artist):
             hi = mid
         else:
             lo = mid + 1
@@ -185,7 +317,7 @@ def first_listen():
     try:
         page_data = lastfm_get(
             "user.getRecentTracks",
-            user=LASTFM_USERNAME,
+            user=username,
             limit=200,
             **{"from": str(week_from), "to": str(week_to)},
         )
@@ -202,7 +334,7 @@ def first_listen():
             else:
                 pd = lastfm_get(
                     "user.getRecentTracks",
-                    user=LASTFM_USERNAME,
+                    user=username,
                     limit=200,
                     page=page,
                     **{"from": str(week_from), "to": str(week_to)},
@@ -232,8 +364,6 @@ def first_listen():
 
     # Fall back to week start date if exact date not found
     if not exact_date:
-        from datetime import datetime, timezone
-
         dt = datetime.fromtimestamp(week_from, tz=timezone.utc)
         exact_date = dt.strftime("%d %b %Y, %H:%M")
         exact_ts = str(week_from)
