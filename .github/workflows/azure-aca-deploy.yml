@@ -34,13 +34,13 @@ jobs:
           AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # - name: Provision Infrastructure
-      #   run: azd provision --no-prompt
-      #   env:
-      #     AZURE_ENV_NAME: ${{ vars.AZURE_ENV_NAME }}
-      #     AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
-      #     AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      #     LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+      - name: Provision Infrastructure
+        run: azd provision --no-prompt
+        env:
+          AZURE_ENV_NAME: ${{ vars.AZURE_ENV_NAME }}
+          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
 
       - name: Deploy Application
         run: azd deploy --no-prompt
