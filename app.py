@@ -433,6 +433,19 @@ def artist_image():
             for img in images:
                 if img.get("size") == "medium" and img.get("#text") and not is_placeholder(img["#text"]):
                     image_url = img["#text"]
+        # Fallback: use the top album's cover art
+        if not image_url:
+            try:
+                albums = lastfm_get("artist.getTopAlbums", artist=artist, limit=1)
+                for album in albums.get("topalbums", {}).get("album", []):
+                    for img in album.get("image", []):
+                        if img.get("size") == "extralarge" and img.get("#text") and not is_placeholder(img["#text"]):
+                            image_url = img["#text"]
+                            break
+                    if image_url:
+                        break
+            except Exception:
+                pass
         return jsonify({"image": image_url})
     except Exception:
         return jsonify({"image": ""})
