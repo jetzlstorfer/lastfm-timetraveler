@@ -130,6 +130,36 @@
       background: rgba(255, 255, 255, 0.07);
     }
 
+    .search-clear-btn {
+      position: absolute;
+      right: 0.875rem;
+      top: 50%;
+      transform: translateY(-50%);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      width: 1.75rem;
+      height: 1.75rem;
+      border: none;
+      background: rgba(255, 255, 255, 0.1);
+      color: #a8a29e;
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 0.75rem;
+      line-height: 1;
+      transition: background 0.15s ease, color 0.15s ease;
+      z-index: 2;
+    }
+
+    .search-clear-btn:hover {
+      background: rgba(213, 16, 7, 0.3);
+      color: #fff;
+    }
+
+    .search-clear-btn.visible {
+      display: flex;
+    }
+
     .primary-button {
       border: none;
       border-radius: 1rem;
@@ -890,7 +920,8 @@
 
         <div id="search-section" class="mt-5 show-animate">
           <div class="search-container relative">
-            <input id="search" class="field-input px-5 py-3 text-base sm:text-lg" type="text" placeholder="Search for a song..." autocomplete="off" />
+            <input id="search" class="field-input px-5 py-3 pr-12 text-base sm:text-lg" type="text" placeholder="Search for a song..." autocomplete="off" aria-describedby="search-clear-btn" />
+            <button id="search-clear-btn" class="search-clear-btn" aria-label="Clear search" type="button">&#x2715;</button>
             <div id="ac-list" class="autocomplete-list"></div>
           </div>
         </div>
@@ -1011,6 +1042,7 @@
     const howItWorks = document.getElementById('how-it-works');
     const recentSearchesSection = document.getElementById('recent-searches-section');
     const recentSearchesGrid = document.getElementById('recent-searches-grid');
+    const searchClearBtn = document.getElementById('search-clear-btn');
 
     let debounceTimer = null;
     let activeIdx = -1;
@@ -1302,6 +1334,7 @@
       recentSearchesSection.classList.remove('show');
       resultCard.classList.remove('show');
       searchInput.value = '';
+      searchClearBtn.classList.remove('visible');
       usernameInput.value = '';
       usernameInput.focus();
       howItWorks.style.display = '';
@@ -1479,11 +1512,19 @@
     searchInput.addEventListener('input', () => {
       clearTimeout(debounceTimer);
       const query = searchInput.value.trim();
+      searchClearBtn.classList.toggle('visible', searchInput.value.length > 0);
       if (query.length < 2) {
         hideAC();
         return;
       }
       debounceTimer = setTimeout(() => fetchAutocomplete(query), 300);
+    });
+
+    searchClearBtn.addEventListener('click', () => {
+      searchInput.value = '';
+      searchClearBtn.classList.remove('visible');
+      hideAC();
+      searchInput.focus();
     });
 
     searchInput.addEventListener('keydown', (event) => {
@@ -1559,6 +1600,7 @@
     async function selectResult(track) {
       hideAC();
       searchInput.value = `${track.name} — ${track.artist}`;
+      searchClearBtn.classList.add('visible');
       resultCard.classList.remove('show');
       const lookupId = createLookupId();
       console.info('[lookup:start]', { username: currentUsername, track: track.name, artist: track.artist });
