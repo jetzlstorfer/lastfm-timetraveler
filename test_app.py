@@ -323,8 +323,10 @@ class TestDatabaseCaching:
         assert stored["track"] == "Cached Song"
         assert stored["first_listen_date"] == "10 Jan 2007, 09:00"
 
-    def test_cached_unavailable_date_sets_flag(self, client):
-        """Cached rows without a timestamp should render as unavailable instead of exact dates."""
+    @patch.object(app_module, "public_library_first_listen_date", return_value=None)
+    @patch.object(app_module, "lastfm_get")
+    def test_cached_unavailable_date_triggers_retry(self, mock_get, mock_public_date, client):
+        """Cached rows without a date should NOT be served from cache — the app retries the lookup."""
         database.save_result(
             "testuser",
             "Sparse Song",
@@ -336,13 +338,16 @@ class TestDatabaseCaching:
             "",
         )
 
+        mock_get.return_value = _track_info_response(userplaycount=1, track="Sparse Song", artist="Sparse Artist")
+        mock_public_date.return_value = None
+
         resp = client.get("/api/first-listen?track=Sparse+Song&artist=Sparse+Artist&username=testuser")
         data = resp.get_json()
 
         assert data["found"] is True
-        assert data["cached"] is True
+        # Should NOT come from cache — a fresh API call should be made
+        assert data.get("cached") is None
         assert data["date_unavailable"] is True
-        assert data["timestamp"] == ""
 
     @patch.object(app_module, "lastfm_get")
     def test_cached_result_served_without_api_call(self, mock_get, client):

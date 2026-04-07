@@ -1013,9 +1013,13 @@
             </div>
           </div>
         `).join('');
+        // Apply artist image fallback for tracks without images
         topTracksGrid.querySelectorAll('.top-track-card').forEach(el => {
+          const t = tracks[+el.dataset.idx];
+          if (!t.image) {
+            applyArtistFallback(el.querySelector('img'), t.artist);
+          }
           el.addEventListener('click', () => {
-            const t = tracks[+el.dataset.idx];
             selectResult({ name: t.name, artist: t.artist, image: t.image });
           });
         });
@@ -1063,6 +1067,10 @@
         `).join('');
 
         otdContent.querySelectorAll('.otd-track').forEach(el => {
+          const img = el.querySelector('img');
+          if (img && img.src.startsWith('data:')) {
+            applyArtistFallback(img, el.dataset.artist);
+          }
           el.addEventListener('click', () => {
             selectResult({ name: el.dataset.name, artist: el.dataset.artist, image: '' });
           });
@@ -1125,6 +1133,10 @@
         </div>
       `).join('');
       acList.querySelectorAll('.ac-item').forEach(el => {
+        const t = items[+el.dataset.idx];
+        if (!t.image) {
+          applyArtistFallback(el.querySelector('img'), t.artist);
+        }
         el.addEventListener('click', () => selectResult(currentResults[+el.dataset.idx]));
       });
       acList.classList.add('show');
@@ -1178,10 +1190,11 @@
           : '';
 
         const imgSrc = data.image || defaultAlbumArt();
+        const resultNeedsArtistFallback = !data.image;
 
         resultCard.innerHTML = `
           <div class="result-header">
-            <img src="${imgSrc}" alt="Album art" />
+            <img src="${imgSrc}" alt="Album art" id="result-art" />
             <div class="result-meta">
               <h2>${escHtml(data.track)}</h2>
               <div class="artist-name">${escHtml(data.artist)}</div>
@@ -1214,6 +1227,9 @@
           </div>
         `;
         resultCard.classList.add('show');
+        if (resultNeedsArtistFallback) {
+          applyArtistFallback(document.getElementById('result-art'), data.artist);
+        }
       } catch (err) {
         stopLoadingAnimation();
         showError('Something went wrong. Please try again.');
@@ -1250,6 +1266,27 @@
 
     function defaultThumb() {
       return "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2240%22 height=%2240%22><rect fill=%22%23333%22 width=%2240%22 height=%2240%22/><text x=%2220%22 y=%2224%22 text-anchor=%22middle%22 fill=%22%23666%22 font-size=%2218%22>♪</text></svg>";
+    }
+
+    // Artist image cache & fallback
+    const artistImageCache = {};
+
+    async function fetchArtistImage(artist) {
+      if (!artist) return '';
+      if (artist in artistImageCache) return artistImageCache[artist];
+      try {
+        const res = await fetch(`/api/artist-image?artist=${encodeURIComponent(artist)}`);
+        const data = await res.json();
+        artistImageCache[artist] = data.image || '';
+      } catch {
+        artistImageCache[artist] = '';
+      }
+      return artistImageCache[artist];
+    }
+
+    async function applyArtistFallback(imgEl, artist) {
+      const url = await fetchArtistImage(artist);
+      if (url) imgEl.src = url;
     }
 
     function defaultAlbumArt() {

@@ -21,9 +21,17 @@ LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
 LASTFM_BASE = "https://ws.audioscrobbler.com/2.0/"
 LIBRARY_PAGE_SIZE = 50
 TRACK_PAGE_DATE_RE = re.compile(
-    r'<span title="[^"]+">\s*([0-9]{1,2} [A-Z][a-z]{2} [0-9]{4}, [0-9]{1,2}:[0-9]{2}(?:am|pm))\s*</span>'
+    r'<span title="(?:[A-Z][a-z]+ )?([0-9]{1,2} [A-Z][a-z]{2} [0-9]{4}, [0-9]{1,2}:[0-9]{2}(?:am|pm))">'
 )
 TRACK_PAGE_PAGINATION_RE = re.compile(r'href="\?page=(\d+)"')
+
+
+# Last.fm returns this hash for the default "star" placeholder — treat as no image
+LASTFM_PLACEHOLDER_HASH = "2a96cbd8b46e442fc41c2b86b821562f"
+
+
+def is_placeholder(url: str) -> bool:
+    return LASTFM_PLACEHOLDER_HASH in url if url else True
 
 
 def lastfm_get(method: str, **params):
@@ -121,7 +129,7 @@ def validate_user():
         user = data.get("user", {})
         image_url = ""
         for img in user.get("image", []):
-            if img.get("size") == "medium" and img.get("#text"):
+            if img.get("size") == "medium" and img.get("#text") and not is_placeholder(img["#text"]):
                 image_url = img["#text"]
         reg = user.get("registered", {})
         if isinstance(reg, dict):
@@ -161,13 +169,21 @@ def user_top_tracks():
         tracks = data.get("toptracks", {}).get("track", [])
         results = []
         for t in tracks:
+            track_name = t.get("name", "")
+            artist_name = t.get("artist", {}).get("name", "")
+            # user.getTopTracks only returns placeholder images;
+            # fetch real album art from track.getInfo
             image_url = ""
-            for img in t.get("image", []):
-                if img.get("size") == "medium" and img.get("#text"):
-                    image_url = img["#text"]
+            try:
+                ti = lastfm_get("track.getInfo", track=track_name, artist=artist_name)
+                for img in ti.get("track", {}).get("album", {}).get("image", []):
+                    if img.get("size") == "medium" and img.get("#text") and not is_placeholder(img["#text"]):
+                        image_url = img["#text"]
+            except Exception:
+                pass
             results.append({
-                "name": t.get("name", ""),
-                "artist": t.get("artist", {}).get("name", ""),
+                "name": track_name,
+                "artist": artist_name,
                 "image": image_url,
                 "playcount": int(t.get("playcount", 0)),
             })
@@ -219,7 +235,7 @@ def on_this_day():
                 if key not in seen:
                     image_url = ""
                     for img in s.get("image", []):
-                        if img.get("size") == "medium" and img.get("#text"):
+                        if img.get("size") == "medium" and img.get("#text") and not is_placeholder(img["#text"]):
                             image_url = img["#text"]
                     seen[key] = len(track_list)
                     track_list.append({
@@ -263,7 +279,7 @@ def search_tracks():
         image_url = ""
         images = t.get("image", [])
         for img in images:
-            if img.get("size") == "medium" and img.get("#text"):
+            if img.get("size") == "medium" and img.get("#text") and not is_placeholder(img["#text"]):
                 image_url = img["#text"]
         results.append(
             {
@@ -287,8 +303,9 @@ def first_listen():
         return jsonify({"error": "track, artist, and username are required"}), 400
 
     # Return cached result immediately if available (first-listen date never changes)
+    # Skip cache entries that have no date — those are transient failures worth retrying.
     cached = db.get_cached(username, track, artist)
-    if cached:
+    if cached and cached.get("first_listen_date"):
         cached_timestamp = cached["first_listen_timestamp"] or ""
         cached_date = cached["first_listen_date"] or ""
         date_unavailable = not bool(cached_date)
@@ -339,7 +356,7 @@ def first_listen():
     album_data = track_info.get("album", {})
     album_name = album_data.get("title", "")
     for img in album_data.get("image", []):
-        if img.get("size") == "extralarge" and img.get("#text"):
+        if img.get("size") == "extralarge" and img.get("#text") and not is_placeholder(img["#text"]):
             image_url = img["#text"]
 
     # Canonical names from Last.fm
@@ -397,6 +414,28 @@ def first_listen():
             "date_unavailable_reason": date_unavailable_reason,
         }
     )
+
+
+@app.route("/api/artist-image")
+def artist_image():
+    """Return the image URL for a given artist."""
+    artist = request.args.get("artist", "").strip()
+    if not artist:
+        return jsonify({"image": ""})
+    try:
+        data = lastfm_get("artist.getInfo", artist=artist)
+        images = data.get("artist", {}).get("image", [])
+        image_url = ""
+        for img in images:
+            if img.get("size") == "extralarge" and img.get("#text") and not is_placeholder(img["#text"]):
+                image_url = img["#text"]
+        if not image_url:
+            for img in images:
+                if img.get("size") == "medium" and img.get("#text") and not is_placeholder(img["#text"]):
+                    image_url = img["#text"]
+        return jsonify({"image": image_url})
+    except Exception:
+        return jsonify({"image": ""})
 
 
 @app.route("/api/history")
