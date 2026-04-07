@@ -1,3 +1,6 @@
+@description('Name of the azd environment used for stable per-environment resource names.')
+param environmentName string
+
 @description('The location for all resources.')
 param location string
 
@@ -5,11 +8,15 @@ param location string
 param tags object
 
 @description('Unique resource token derived from the subscription, environment name, and location.')
+@minLength(2)
 param resourceToken string
 
 @description('Last.fm API key stored as a Container App secret.')
 @secure()
 param lastfmApiKey string = ''
+
+var normalizedEnvironmentName = toLower(replace(replace(environmentName, '_', '-'), ' ', '-'))
+var containerAppName = take('ca-${normalizedEnvironmentName}', 32)
 
 // ---------------------------------------------------------------------------
 // Log Analytics Workspace (required by Container Apps Environment)
@@ -63,7 +70,7 @@ resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2023-05-01'
 // Container App
 // ---------------------------------------------------------------------------
 resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
-  name: 'ca-${resourceToken}'
+  name: containerAppName
   location: location
   tags: union(tags, { 'azd-service-name': 'web' })
   properties: {
