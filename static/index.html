@@ -63,6 +63,7 @@
     #search-section,
     #top-tracks-section,
     #on-this-day-section,
+    #recent-searches-section,
     #loading-screen,
     #result {
       display: none;
@@ -71,6 +72,7 @@
     #config-banner.show,
     #search-section.show,
     #top-tracks-section.show,
+    #recent-searches-section.show,
     #result.show {
       display: block;
     }
@@ -249,6 +251,71 @@
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       gap: 0.85rem;
+    }
+
+    .recent-searches-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 0.85rem;
+    }
+
+    .rs-card {
+      display: flex;
+      align-items: center;
+      gap: 0.875rem;
+      min-width: 0;
+      border-radius: 1.1rem;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.035);
+      padding: 0.9rem 1rem;
+      cursor: pointer;
+      transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+    }
+
+    .rs-card:hover {
+      transform: translateY(-1px);
+      border-color: rgba(213, 16, 7, 0.35);
+      background: rgba(213, 16, 7, 0.08);
+    }
+
+    .rs-card img {
+      width: 3rem;
+      height: 3rem;
+      border-radius: 0.9rem;
+      object-fit: cover;
+      background: rgba(255, 255, 255, 0.08);
+      flex-shrink: 0;
+    }
+
+    .rs-text {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .rs-name {
+      color: #fafaf9;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .rs-artist {
+      font-size: 0.85rem;
+      color: #a8a29e;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .rs-date {
+      font-size: 0.78rem;
+      color: #a8a29e;
+      margin-top: 0.15rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .otd-tracks {
@@ -875,6 +942,17 @@
         </section>
       </div>
 
+      <!-- Recently Searched -->
+      <section id="recent-searches-section" class="glass-panel rounded-[2rem] px-5 py-6 sm:px-7 sm:py-7 show-animate">
+        <div class="mb-5 flex items-center justify-between">
+          <div>
+            <div class="section-eyebrow text-xs font-semibold uppercase tracking-[0.16em]">Your lookup history</div>
+            <div class="section-title mt-2">🕵️ Recently searched</div>
+          </div>
+        </div>
+        <div class="recent-searches-grid" id="recent-searches-grid"></div>
+      </section>
+
       <!-- How it works (shown before login, hidden after) -->
       <section id="how-it-works" class="glass-panel rounded-[2rem] px-5 py-6 sm:px-7 sm:py-7">
         <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-400">How it works</div>
@@ -922,6 +1000,8 @@
     const otdContent = document.getElementById('on-this-day-content');
     const otdLoading = document.getElementById('otd-loading');
     const howItWorks = document.getElementById('how-it-works');
+    const recentSearchesSection = document.getElementById('recent-searches-section');
+    const recentSearchesGrid = document.getElementById('recent-searches-grid');
 
     let debounceTimer = null;
     let activeIdx = -1;
@@ -1210,6 +1290,7 @@
       searchSection.classList.remove('show');
       topTracksSection.classList.remove('show');
       otdSection.classList.remove('show');
+      recentSearchesSection.classList.remove('show');
       resultCard.classList.remove('show');
       searchInput.value = '';
       usernameInput.value = '';
@@ -1248,6 +1329,7 @@
 
         loadTopTracks();
         loadOnThisDay();
+        loadRecentSearches();
       } catch {
         alert('Could not connect. Please try again.');
       }
@@ -1346,6 +1428,42 @@
       } catch {
         otdLoading.style.display = 'none';
         otdContent.innerHTML = '<div class="otd-empty">Could not load On This Day data.</div>';
+      }
+    }
+
+    async function loadRecentSearches() {
+      if (!currentUsername) return;
+      try {
+        const res = await fetch(`/api/history?username=${encodeURIComponent(currentUsername)}`);
+        const items = await res.json();
+        if (!items.length) {
+          recentSearchesSection.classList.remove('show');
+          return;
+        }
+        recentSearchesGrid.innerHTML = items.map((item, index) => `
+          <div class="rs-card" data-idx="${index}">
+            <img src="${item.image || defaultThumb()}" alt="" />
+            <div class="rs-text">
+              <div class="rs-name">${escHtml(item.track)}</div>
+              <div class="rs-artist">${escHtml(item.artist)}</div>
+              ${item.date ? `<div class="rs-date">First heard: ${escHtml(item.date)}</div>` : ''}
+            </div>
+          </div>
+        `).join('');
+
+        recentSearchesGrid.querySelectorAll('.rs-card').forEach((el) => {
+          const item = items[Number(el.dataset.idx)];
+          if (!item.image) {
+            applyArtistFallback(el.querySelector('img'), item.artist);
+          }
+          el.addEventListener('click', () => {
+            selectResult({ name: item.track, artist: item.artist, image: item.image });
+          });
+        });
+
+        recentSearchesSection.classList.add('show');
+      } catch {
+        recentSearchesSection.classList.remove('show');
       }
     }
 
@@ -1518,6 +1636,7 @@
         if (resultNeedsArtistFallback) {
           applyArtistFallback(document.getElementById('result-art'), data.artist);
         }
+        loadRecentSearches();
       } catch {
         stopLoadingAnimation();
         console.error('[lookup:error]', { username: currentUsername, track: track.name, artist: track.artist });
