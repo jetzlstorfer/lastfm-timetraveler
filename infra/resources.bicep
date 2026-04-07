@@ -11,9 +11,6 @@ param resourceToken string
 @secure()
 param lastfmApiKey string = ''
 
-@description('Last.fm username exposed as an environment variable.')
-param lastfmUsername string = ''
-
 // ---------------------------------------------------------------------------
 // Log Analytics Workspace (required by Container Apps Environment)
 // ---------------------------------------------------------------------------
@@ -105,10 +102,6 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
             {
               name: 'LASTFM_API_KEY'
               secretRef: 'lastfm-api-key'
-            }
-            {
-              name: 'LASTFM_USERNAME'
-              value: lastfmUsername
             }
           ]
           resources: {

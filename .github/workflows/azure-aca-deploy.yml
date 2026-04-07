@@ -41,7 +41,6 @@ jobs:
           AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
           AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
           LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
-          LASTFM_USERNAME: ${{ vars.LASTFM_USERNAME }}
 
       - name: Deploy Application
         run: azd deploy --no-prompt

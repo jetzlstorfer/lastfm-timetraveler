@@ -10,9 +10,6 @@
     },
     "lastfmApiKey": {
       "value": "${LASTFM_API_KEY}"
-    },
-    "lastfmUsername": {
-      "value": "${LASTFM_USERNAME}"
     }
   }
 }

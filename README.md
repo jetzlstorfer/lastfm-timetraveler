@@ -55,7 +55,6 @@ You will be prompted for:
 - `AZURE_ENV_NAME` — a short name for this environment (e.g. `lastfm-prod`)
 - `AZURE_LOCATION` — Azure region (e.g. `eastus`)
 - `LASTFM_API_KEY` — your Last.fm API key (stored as a secret)
-- `LASTFM_USERNAME` — your Last.fm username
 
 ### CI/CD with GitHub Actions
 
@@ -70,7 +69,6 @@ The `.github/workflows/azure-dev.yml` workflow runs `azd provision` and `azd dep
 | `AZURE_SUBSCRIPTION_ID` | Variable | Azure subscription ID |
 | `AZURE_ENV_NAME` | Variable | azd environment name |
 | `AZURE_LOCATION` | Variable | Azure region (e.g. `eastus`) |
-| `LASTFM_USERNAME` | Variable | Last.fm username |
 | `LASTFM_API_KEY` | **Secret** | Last.fm API key |
 
 To set up federated credentials (OIDC) for the service principal, follow the [azd GitHub Actions guide](https://learn.microsoft.com/azure/developer/azure-developer-cli/configure-devops-pipeline).

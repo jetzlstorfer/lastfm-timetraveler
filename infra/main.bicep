@@ -13,9 +13,6 @@ param location string
 @secure()
 param lastfmApiKey string = ''
 
-@description('Last.fm username.')
-param lastfmUsername string = ''
-
 var tags = { 'azd-env-name': environmentName }
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
 
@@ -33,7 +30,6 @@ module resources 'resources.bicep' = {
     tags: tags
     resourceToken: resourceToken
     lastfmApiKey: lastfmApiKey
-    lastfmUsername: lastfmUsername
   }
 }
 
