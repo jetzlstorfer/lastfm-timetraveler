@@ -1,5 +1,10 @@
 import os
+import re
+import time
+from math import ceil
 from datetime import datetime, timezone, timedelta
+from urllib.parse import quote
+from zoneinfo import ZoneInfo
 import requests
 from flask import Flask, jsonify, request, send_from_directory
 from dotenv import load_dotenv
@@ -14,13 +19,82 @@ with app.app_context():
 
 LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
 LASTFM_BASE = "https://ws.audioscrobbler.com/2.0/"
+LIBRARY_PAGE_SIZE = 50
+TRACK_PAGE_DATE_RE = re.compile(
+    r'<span title="[^"]+">\s*([0-9]{1,2} [A-Z][a-z]{2} [0-9]{4}, [0-9]{1,2}:[0-9]{2}(?:am|pm))\s*</span>'
+)
+TRACK_PAGE_PAGINATION_RE = re.compile(r'href="\?page=(\d+)"')
 
 
 def lastfm_get(method: str, **params):
     params.update({"method": method, "api_key": LASTFM_API_KEY, "format": "json"})
-    resp = requests.get(LASTFM_BASE, params=params, timeout=15)
+    last_exc = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(LASTFM_BASE, params=params, timeout=15)
+            if resp.status_code == 429 or resp.status_code >= 500:
+                last_exc = requests.HTTPError(response=resp)
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+                resp.raise_for_status()
+            resp.raise_for_status()
+            return resp.json()
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+                continue
+            raise
+    raise last_exc
+
+
+def public_library_first_listen_date(
+    username: str, artist: str, track: str, total_scrobbles: int
+) -> str | None:
+    """Scrape the public track page from Last.fm and return the oldest scrobble date.
+
+    The public library page exposes exact per-track scrobble timestamps even when the
+    API cannot reliably locate sparse plays through weekly charts.
+    """
+
+    base_url = (
+        f"https://www.last.fm/user/{quote(username, safe='')}/library/music/"
+        f"{quote(artist, safe='')}/_/{quote(track, safe='')}"
+    )
+    headers = {"User-Agent": "lastfm-timetraveler/1.0"}
+
+    resp = requests.get(base_url, headers=headers, timeout=20)
+    if resp.status_code == 404:
+        return None
     resp.raise_for_status()
-    return resp.json()
+
+    page_count = max(
+        [int(m) for m in TRACK_PAGE_PAGINATION_RE.findall(resp.text)] or [1]
+    )
+    if total_scrobbles > 0:
+        page_count = max(page_count, ceil(total_scrobbles / LIBRARY_PAGE_SIZE))
+
+    last_page_html = resp.text
+    if page_count > 1:
+        last_resp = requests.get(
+            f"{base_url}?page={page_count}", headers=headers, timeout=20
+        )
+        last_resp.raise_for_status()
+        last_page_html = last_resp.text
+
+    matches = TRACK_PAGE_DATE_RE.findall(last_page_html)
+    if not matches:
+        return None
+
+    return matches[-1]
+
+
+def lastfm_library_date_to_timestamp(date_text: str) -> str:
+    """Convert a Last.fm library page date to a unix timestamp string."""
+    dt = datetime.strptime(date_text, "%d %b %Y, %I:%M%p")
+    dt = dt.replace(tzinfo=ZoneInfo("Europe/Vienna"))
+    return str(int(dt.timestamp()))
 
 
 @app.route("/")
@@ -203,27 +277,6 @@ def search_tracks():
     return jsonify(results)
 
 
-def _track_in_chart_range(username, from_ts, to_ts, track, artist):
-    """Check if a track appears in the user's weekly chart for a time range."""
-    data = lastfm_get(
-        "user.getWeeklyTrackChart",
-        user=username,
-        **{"from": str(from_ts), "to": str(to_ts)},
-    )
-    tracks = data.get("weeklytrackchart", {}).get("track", [])
-    if isinstance(tracks, dict):
-        tracks = [tracks]
-    track_l, artist_l = track.lower(), artist.lower()
-    for t in tracks:
-        t_artist = t.get("artist", {})
-        t_artist_name = (
-            t_artist.get("#text", "") if isinstance(t_artist, dict) else str(t_artist)
-        )
-        if t.get("name", "").lower() == track_l and t_artist_name.lower() == artist_l:
-            return True
-    return False
-
-
 @app.route("/api/first-listen")
 def first_listen():
     """Find the very first scrobble of a track for the given user."""
@@ -236,16 +289,25 @@ def first_listen():
     # Return cached result immediately if available (first-listen date never changes)
     cached = db.get_cached(username, track, artist)
     if cached:
+        cached_timestamp = cached["first_listen_timestamp"] or ""
+        cached_date = cached["first_listen_date"] or ""
+        date_unavailable = not bool(cached_date)
         return jsonify(
             {
                 "found": True,
                 "track": cached["track"],
                 "artist": cached["artist"],
                 "album": cached["album"] or "",
-                "date": cached["first_listen_date"],
-                "timestamp": cached["first_listen_timestamp"],
+                "date": cached_date,
+                "timestamp": cached_timestamp,
                 "total_scrobbles": cached["total_scrobbles"],
                 "image": cached["image"] or "",
+                "date_unavailable": date_unavailable,
+                "date_unavailable_reason": (
+                    "Last.fm reports a play for this track, but the public data exposed to the app does not include an exact first-listen timestamp."
+                    if date_unavailable
+                    else ""
+                ),
                 "cached": True,
             }
         )
@@ -283,89 +345,31 @@ def first_listen():
     # Canonical names from Last.fm
     canonical_track = track_info.get("name", track)
     canonical_artist = track_info.get("artist", {}).get("name", artist)
-
-    # Step 2: Binary search weekly charts to find the earliest week
-    try:
-        chart_list = lastfm_get("user.getWeeklyChartList", user=username)
-    except requests.HTTPError:
-        return jsonify({"error": "Last.fm API error"}), 502
-
-    weeks = chart_list.get("weeklychartlist", {}).get("chart", [])
-    if not weeks:
-        return jsonify({"error": "Could not retrieve chart history"}), 502
-
-    first_from = int(weeks[0]["from"])
-    lo, hi = 0, len(weeks) - 1
-
-    while lo < hi:
-        mid = (lo + hi) // 2
-        mid_to = int(weeks[mid]["to"])
-        if _track_in_chart_range(username, first_from, mid_to, canonical_track, canonical_artist):
-            hi = mid
-        else:
-            lo = mid + 1
-
-    # lo == hi == index of the earliest week containing the track
-    earliest_week = weeks[lo]
-    week_from = int(earliest_week["from"])
-    week_to = int(earliest_week["to"])
-
-    # Step 3: Try to find the exact scrobble date within that week
     exact_date = None
-    exact_ts = None
+    exact_ts = ""
+    date_unavailable_reason = ""
+
     try:
-        page_data = lastfm_get(
-            "user.getRecentTracks",
-            user=username,
-            limit=200,
-            **{"from": str(week_from), "to": str(week_to)},
+        exact_date = public_library_first_listen_date(
+            username, canonical_artist, canonical_track, total
         )
-        total_pages = int(
-            page_data.get("recenttracks", {}).get("@attr", {}).get("totalPages", 0)
+        if exact_date:
+            exact_ts = lastfm_library_date_to_timestamp(exact_date)
+    except requests.RequestException:
+        date_unavailable_reason = (
+            "The public Last.fm track page could not be fetched, so the exact first-listen timestamp could not be determined."
         )
-        track_l = canonical_track.lower()
-        artist_l = canonical_artist.lower()
+    except ValueError:
+        date_unavailable_reason = (
+            "The public Last.fm track page exposed a date, but it could not be converted into a timestamp."
+        )
 
-        # Scan from the last page (oldest scrobbles) to find the first occurrence
-        for page in range(total_pages, 0, -1):
-            if page == 1 and total_pages == 1:
-                scrobbles = page_data.get("recenttracks", {}).get("track", [])
-            else:
-                pd = lastfm_get(
-                    "user.getRecentTracks",
-                    user=username,
-                    limit=200,
-                    page=page,
-                    **{"from": str(week_from), "to": str(week_to)},
-                )
-                scrobbles = pd.get("recenttracks", {}).get("track", [])
-            if isinstance(scrobbles, dict):
-                scrobbles = [scrobbles]
-            for s in reversed(scrobbles):
-                s_artist = s.get("artist", {})
-                s_artist_name = (
-                    s_artist.get("#text", "")
-                    if isinstance(s_artist, dict)
-                    else str(s_artist)
-                )
-                if (
-                    s.get("name", "").lower() == track_l
-                    and s_artist_name.lower() == artist_l
-                ):
-                    date_info = s.get("date", {})
-                    exact_date = date_info.get("#text")
-                    exact_ts = date_info.get("uts")
-                    break
-            if exact_date:
-                break
-    except Exception:
-        pass
-
-    # Fall back to week start date if exact date not found
     if not exact_date:
-        dt = datetime.fromtimestamp(week_from, tz=timezone.utc)
-        exact_date = dt.strftime("%d %b %Y, %H:%M")
-        exact_ts = str(week_from)
+        date_unavailable_reason = date_unavailable_reason or (
+            "Last.fm reports a play for this track, but the public track history page does not expose an exact first-listen timestamp."
+        )
+
+    date_unavailable = not bool(exact_date)
 
     # Persist the result so future queries are served from the local cache
     db.save_result(
@@ -373,8 +377,8 @@ def first_listen():
         canonical_track,
         canonical_artist,
         album_name,
-        exact_date,
-        exact_ts,
+        exact_date or "",
+        exact_ts or "",
         total,
         image_url,
     )
@@ -385,10 +389,12 @@ def first_listen():
             "track": canonical_track,
             "artist": canonical_artist,
             "album": album_name,
-            "date": exact_date,
-            "timestamp": exact_ts,
+            "date": exact_date or "",
+            "timestamp": exact_ts or "",
             "total_scrobbles": total,
             "image": image_url,
+            "date_unavailable": date_unavailable,
+            "date_unavailable_reason": date_unavailable_reason,
         }
     )
 

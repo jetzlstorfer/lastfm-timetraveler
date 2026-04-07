@@ -208,34 +208,18 @@ class TestFirstListen:
         assert data["found"] is False
         assert "never" in data["message"].lower()
 
+    @patch.object(app_module, "public_library_first_listen_date")
     @patch.object(app_module, "lastfm_get")
-    def test_track_found_with_exact_date(self, mock_get, client):
-        """Full happy path: binary search finds the week, getRecentTracks finds the exact date."""
-        weeks = [(1000000 + i * 604800, 1000000 + (i + 1) * 604800) for i in range(20)]
-
-        def fake_lastfm_get(method, **kwargs):
-            if method == "track.getInfo":
-                return _track_info_response(
-                    userplaycount=42, track="TestTrack", artist="TestArtist",
-                    album="TestAlbum", image_url="https://img.example/cover.jpg",
-                )
-            if method == "user.getWeeklyChartList":
-                return _weekly_chart_list(weeks)
-            if method == "user.getWeeklyTrackChart":
-                to_ts = int(kwargs.get("to", 0))
-                # Track first appears in week index 10
-                target_to = weeks[10][1]
-                if to_ts >= target_to:
-                    return _weekly_track_chart([("TestTrack", "TestArtist", 3)])
-                return _weekly_track_chart([])
-            if method == "user.getRecentTracks":
-                return _recent_tracks_response([
-                    ("OtherSong", "OtherArtist", "01 Jan 2007, 15:00", "1167663600"),
-                    ("TestTrack", "TestArtist", "02 Jan 2007, 20:30", "1167769800"),
-                ], page=1, total_pages=1)
-            return {}
-
-        mock_get.side_effect = fake_lastfm_get
+    def test_track_found_with_exact_date(self, mock_get, mock_public_date, client):
+        """Full happy path: the public track page exposes the exact date."""
+        mock_get.return_value = _track_info_response(
+            userplaycount=42,
+            track="TestTrack",
+            artist="TestArtist",
+            album="TestAlbum",
+            image_url="https://img.example/cover.jpg",
+        )
+        mock_public_date.return_value = "02 Jan 2007, 20:30"
         resp = client.get("/api/first-listen?track=TestTrack&artist=TestArtist&username=testuser")
         data = resp.get_json()
 
@@ -245,63 +229,46 @@ class TestFirstListen:
         assert data["album"] == "TestAlbum"
         assert data["total_scrobbles"] == 42
         assert data["date"] == "02 Jan 2007, 20:30"
-        assert data["timestamp"] == "1167769800"
+        assert data["timestamp"] == ""
+        assert data["date_unavailable"] is False
         assert data["image"] == "https://img.example/cover.jpg"
 
     @patch.object(app_module, "lastfm_get")
-    def test_fallback_to_week_start_when_exact_date_unavailable(self, mock_get, client):
-        """When getRecentTracks doesn't find the track, falls back to week start."""
-        weeks = [(1167609600, 1168214400), (1168214400, 1168819200)]
-
-        def fake_lastfm_get(method, **kwargs):
-            if method == "track.getInfo":
-                return _track_info_response(userplaycount=5, track="Song", artist="Band")
-            if method == "user.getWeeklyChartList":
-                return _weekly_chart_list(weeks)
-            if method == "user.getWeeklyTrackChart":
-                # Track in all weeks
-                return _weekly_track_chart([("Song", "Band", 5)])
-            if method == "user.getRecentTracks":
-                # Return empty — exact date unavailable (old data)
-                return _recent_tracks_response([], page=1, total_pages=0)
-            return {}
-
-        mock_get.side_effect = fake_lastfm_get
+    def test_no_chart_history_returns_error(self, mock_get, client):
+        """Track lookup errors from Last.fm still surface as backend errors."""
+        mock_get.side_effect = app_module.requests.HTTPError("503 Server Error")
         resp = client.get("/api/first-listen?track=Song&artist=Band&username=testuser")
-        data = resp.get_json()
+        assert resp.status_code == 502
 
-        assert data["found"] is True
-        # Falls back to the start of the earliest week
-        assert data["timestamp"] == str(weeks[0][0])
-
+    @patch.object(app_module, "public_library_first_listen_date")
     @patch.object(app_module, "lastfm_get")
-    def test_binary_search_converges_to_correct_week(self, mock_get, client):
-        """Verify the binary search picks the earliest week, not just any matching one."""
-        weeks = [(1000000 + i * 604800, 1000000 + (i + 1) * 604800) for i in range(100)]
-        first_week_idx = 37  # track first appears in week 37
-
-        def fake_lastfm_get(method, **kwargs):
-            if method == "track.getInfo":
-                return _track_info_response(userplaycount=10, track="X", artist="Y")
-            if method == "user.getWeeklyChartList":
-                return _weekly_chart_list(weeks)
-            if method == "user.getWeeklyTrackChart":
-                to_ts = int(kwargs.get("to", 0))
-                target_to = weeks[first_week_idx][1]
-                if to_ts >= target_to:
-                    return _weekly_track_chart([("X", "Y", 1)])
-                return _weekly_track_chart([])
-            if method == "user.getRecentTracks":
-                return _recent_tracks_response([], page=1, total_pages=0)
-            return {}
-
-        mock_get.side_effect = fake_lastfm_get
+    def test_unavailable_when_public_track_page_has_no_timestamp(self, mock_get, mock_public_date, client):
+        """If the public track page has no date, do not invent one."""
+        mock_get.return_value = _track_info_response(userplaycount=10, track="X", artist="Y")
+        mock_public_date.return_value = None
         resp = client.get("/api/first-listen?track=X&artist=Y&username=testuser")
         data = resp.get_json()
 
         assert data["found"] is True
-        # Should fall back to the start of week 37
-        assert data["timestamp"] == str(weeks[first_week_idx][0])
+        assert data["date"] == ""
+        assert data["timestamp"] == ""
+        assert data["date_unavailable"] is True
+        assert "public track history page" in data["date_unavailable_reason"].lower()
+
+    @patch.object(app_module, "public_library_first_listen_date")
+    @patch.object(app_module, "lastfm_get")
+    def test_private_or_sparse_history_returns_unavailable_date(self, mock_get, mock_public_date, client):
+        """If Last.fm reports a playcount but the public track page has no exact date, return unavailable."""
+        mock_get.return_value = _track_info_response(userplaycount=1, track="Rare Song", artist="Rare Artist")
+        mock_public_date.return_value = None
+        resp = client.get("/api/first-listen?track=Rare+Song&artist=Rare+Artist&username=testuser")
+        data = resp.get_json()
+
+        assert data["found"] is True
+        assert data["date"] == ""
+        assert data["timestamp"] == ""
+        assert data["date_unavailable"] is True
+        assert "public track history page" in data["date_unavailable_reason"].lower()
 
     @patch.object(app_module, "lastfm_get")
     def test_track_getinfo_http_error_returns_502(self, mock_get, client):
@@ -310,26 +277,12 @@ class TestFirstListen:
         resp = client.get("/api/first-listen?track=A&artist=B&username=testuser")
         assert resp.status_code == 502
 
+    @patch.object(app_module, "public_library_first_listen_date")
     @patch.object(app_module, "lastfm_get")
-    def test_single_week_history(self, mock_get, client):
-        """User with only one week of scrobbling history."""
-        weeks = [(1167609600, 1168214400)]
-
-        def fake_lastfm_get(method, **kwargs):
-            if method == "track.getInfo":
-                return _track_info_response(userplaycount=1, track="Only", artist="One")
-            if method == "user.getWeeklyChartList":
-                return _weekly_chart_list(weeks)
-            if method == "user.getWeeklyTrackChart":
-                return _weekly_track_chart([("Only", "One", 1)])
-            if method == "user.getRecentTracks":
-                return _recent_tracks_response(
-                    [("Only", "One", "03 Jan 2007, 10:00", "1167818400")],
-                    page=1, total_pages=1,
-                )
-            return {}
-
-        mock_get.side_effect = fake_lastfm_get
+    def test_single_page_history(self, mock_get, mock_public_date, client):
+        """A single public track page date is returned correctly."""
+        mock_get.return_value = _track_info_response(userplaycount=1, track="Only", artist="One")
+        mock_public_date.return_value = "03 Jan 2007, 10:00"
         resp = client.get("/api/first-listen?track=Only&artist=One&username=testuser")
         data = resp.get_json()
 
@@ -337,27 +290,12 @@ class TestFirstListen:
         assert data["date"] == "03 Jan 2007, 10:00"
         assert data["total_scrobbles"] == 1
 
+    @patch.object(app_module, "public_library_first_listen_date")
     @patch.object(app_module, "lastfm_get")
-    def test_case_insensitive_matching(self, mock_get, client):
-        """Track/artist matching in weekly charts should be case-insensitive."""
-        weeks = [(1000000, 1604800)]
-
-        def fake_lastfm_get(method, **kwargs):
-            if method == "track.getInfo":
-                return _track_info_response(userplaycount=3, track="My Song", artist="The Band")
-            if method == "user.getWeeklyChartList":
-                return _weekly_chart_list(weeks)
-            if method == "user.getWeeklyTrackChart":
-                # API returns lowercase
-                return _weekly_track_chart([("my song", "the band", 3)])
-            if method == "user.getRecentTracks":
-                return _recent_tracks_response(
-                    [("my song", "the band", "15 Jan 2007, 12:00", "1168855200")],
-                    page=1, total_pages=1,
-                )
-            return {}
-
-        mock_get.side_effect = fake_lastfm_get
+    def test_case_insensitive_matching(self, mock_get, mock_public_date, client):
+        """Canonical names from track.getInfo are used for the public page lookup."""
+        mock_get.return_value = _track_info_response(userplaycount=3, track="My Song", artist="The Band")
+        mock_public_date.return_value = "15 Jan 2007, 12:00"
         resp = client.get("/api/first-listen?track=My+Song&artist=The+Band&username=testuser")
         data = resp.get_json()
         assert data["found"] is True
@@ -368,28 +306,13 @@ class TestFirstListen:
 # ---------------------------------------------------------------------------
 
 class TestDatabaseCaching:
-    @patch.object(app_module, "LASTFM_USERNAME", "testuser")
+    @patch.object(app_module, "public_library_first_listen_date")
     @patch.object(app_module, "lastfm_get")
-    def test_result_is_cached_after_first_query(self, mock_get, client):
+    def test_result_is_cached_after_first_query(self, mock_get, mock_public_date, client):
         """After a successful lookup the result must be stored in the DB."""
-        weeks = [(1000000, 1604800)]
-
-        def fake_lastfm_get(method, **kwargs):
-            if method == "track.getInfo":
-                return _track_info_response(userplaycount=5, track="Cached Song", artist="Artist")
-            if method == "user.getWeeklyChartList":
-                return _weekly_chart_list(weeks)
-            if method == "user.getWeeklyTrackChart":
-                return _weekly_track_chart([("Cached Song", "Artist", 5)])
-            if method == "user.getRecentTracks":
-                return _recent_tracks_response(
-                    [("Cached Song", "Artist", "10 Jan 2007, 09:00", "1168419600")],
-                    page=1, total_pages=1,
-                )
-            return {}
-
-        mock_get.side_effect = fake_lastfm_get
-        resp = client.get("/api/first-listen?track=Cached+Song&artist=Artist")
+        mock_get.return_value = _track_info_response(userplaycount=5, track="Cached Song", artist="Artist")
+        mock_public_date.return_value = "10 Jan 2007, 09:00"
+        resp = client.get("/api/first-listen?track=Cached+Song&artist=Artist&username=testuser")
         data = resp.get_json()
         assert data["found"] is True
         assert data.get("cached") is None  # first hit is not from cache
@@ -400,7 +323,27 @@ class TestDatabaseCaching:
         assert stored["track"] == "Cached Song"
         assert stored["first_listen_date"] == "10 Jan 2007, 09:00"
 
-    @patch.object(app_module, "LASTFM_USERNAME", "testuser")
+    def test_cached_unavailable_date_sets_flag(self, client):
+        """Cached rows without a timestamp should render as unavailable instead of exact dates."""
+        database.save_result(
+            "testuser",
+            "Sparse Song",
+            "Sparse Artist",
+            "",
+            "",
+            "",
+            1,
+            "",
+        )
+
+        resp = client.get("/api/first-listen?track=Sparse+Song&artist=Sparse+Artist&username=testuser")
+        data = resp.get_json()
+
+        assert data["found"] is True
+        assert data["cached"] is True
+        assert data["date_unavailable"] is True
+        assert data["timestamp"] == ""
+
     @patch.object(app_module, "lastfm_get")
     def test_cached_result_served_without_api_call(self, mock_get, client):
         """Second query for the same track must come from cache (no API call)."""
@@ -412,7 +355,7 @@ class TestDatabaseCaching:
             88, "https://img.example/lazy.jpg",
         )
 
-        resp = client.get("/api/first-listen?track=Lazy+Song&artist=Bruno+Mars")
+        resp = client.get("/api/first-listen?track=Lazy+Song&artist=Bruno+Mars&username=testuser")
         data = resp.get_json()
 
         assert data["found"] is True
@@ -423,7 +366,6 @@ class TestDatabaseCaching:
         # The Last.fm API must not have been called at all
         mock_get.assert_not_called()
 
-    @patch.object(app_module, "LASTFM_USERNAME", "testuser")
     @patch.object(app_module, "lastfm_get")
     def test_cache_lookup_is_case_insensitive(self, mock_get, client):
         """Cache hit should work regardless of the casing used in the query."""
@@ -434,7 +376,7 @@ class TestDatabaseCaching:
             1000, "",
         )
 
-        resp = client.get("/api/first-listen?track=bohemian+rhapsody&artist=queen")
+        resp = client.get("/api/first-listen?track=bohemian+rhapsody&artist=queen&username=testuser")
         data = resp.get_json()
 
         assert data["found"] is True
@@ -447,13 +389,11 @@ class TestDatabaseCaching:
 # ---------------------------------------------------------------------------
 
 class TestHistory:
-    @patch.object(app_module, "LASTFM_USERNAME", "testuser")
     def test_empty_history(self, client):
-        resp = client.get("/api/history")
+        resp = client.get("/api/history?username=testuser")
         assert resp.status_code == 200
         assert resp.get_json() == []
 
-    @patch.object(app_module, "LASTFM_USERNAME", "testuser")
     def test_history_returns_saved_results(self, client):
         database.save_result(
             "testuser", "Track One", "Artist A", "Album A",
@@ -464,14 +404,13 @@ class TestHistory:
             "15 Jun 2015, 18:30", "1434389400", 25, "",
         )
 
-        resp = client.get("/api/history")
+        resp = client.get("/api/history?username=testuser")
         data = resp.get_json()
 
         assert len(data) == 2
         tracks = {r["track"] for r in data}
         assert tracks == {"Track One", "Track Two"}
 
-    @patch.object(app_module, "LASTFM_USERNAME", "testuser")
     def test_history_filters_by_username(self, client):
         database.save_result(
             "testuser", "My Track", "My Artist", "", "01 Jan 2010, 00:00", "1262304000", 5, "",

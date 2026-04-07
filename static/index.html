@@ -39,6 +39,13 @@
     /* Username section */
     .username-section {
       width: min(90vw, 480px);
+    .stat-note {
+      margin-top: 0.35rem;
+      max-width: 30rem;
+      color: #a7a7a7;
+      font-size: 0.84rem;
+      line-height: 1.4;
+    }
       margin-bottom: 1.5rem;
     }
 
@@ -494,19 +501,123 @@
       font-size: 1rem;
     }
 
-    .spinner {
+    /* === Time-travel loading screen === */
+    .loading-screen {
       margin-top: 2rem;
-      width: 40px; height: 40px;
-      border: 4px solid rgba(255,255,255,0.1);
-      border-top-color: #d51007;
-      border-radius: 50%;
-      animation: spin 0.8s linear infinite;
+      width: min(90vw, 480px);
       display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 0;
+      animation: slideUp 0.4s ease;
+    }
+    .loading-screen.show { display: flex; }
+
+    /* Starfield viewport */
+    .starfield {
+      position: relative;
+      width: 100%;
+      height: 180px;
+      background: radial-gradient(ellipse at center, #1a1740 0%, #0f0c29 70%);
+      border-radius: 16px 16px 0 0;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.08);
+      border-bottom: none;
     }
 
-    .spinner.show { display: block; }
+    /* Stars */
+    .star {
+      position: absolute;
+      background: #fff;
+      border-radius: 50%;
+      animation: starStreak var(--dur) linear infinite;
+      opacity: 0;
+    }
+    @keyframes starStreak {
+      0%   { transform: translateX(0); opacity: 0; }
+      10%  { opacity: 1; }
+      90%  { opacity: 1; }
+      100% { transform: translateX(-120vw); opacity: 0; }
+    }
 
-    @keyframes spin { to { transform: rotate(360deg); } }
+    /* Rocket — rotated to point right */
+    .rocket-container {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%) rotate(45deg);
+      font-size: 3rem;
+      filter: drop-shadow(0 0 18px rgba(213,16,7,0.5));
+      animation: rocketBob 2s ease-in-out infinite;
+      z-index: 2;
+      line-height: 1;
+    }
+    @keyframes rocketBob {
+      0%, 100% { transform: translate(-50%, -50%) rotate(45deg) translateY(0); }
+      50%      { transform: translate(-50%, -50%) rotate(45deg) translateY(-8px); }
+    }
+
+
+    /* Year counter */
+    .year-counter {
+      position: absolute;
+      top: 14px;
+      right: 18px;
+      font-size: 1.6rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      background: linear-gradient(90deg, #d51007, #ff6b6b);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      z-index: 3;
+      text-shadow: none;
+    }
+    .year-label {
+      position: absolute;
+      top: 44px;
+      right: 18px;
+      font-size: 0.65rem;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      z-index: 3;
+    }
+
+    /* Fun facts area */
+    .fun-facts-bar {
+      width: 100%;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 0 0 16px 16px;
+      padding: 16px 22px;
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .fact-icon {
+      font-size: 1.4rem;
+      flex-shrink: 0;
+    }
+    .fact-text {
+      font-size: 0.88rem;
+      color: #bbb;
+      line-height: 1.45;
+      animation: factFade 0.5s ease;
+    }
+    @keyframes factFade {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .loading-status {
+      text-align: center;
+      margin-top: 10px;
+      font-size: 0.78rem;
+      color: #666;
+    }
+    .loading-status .loading-dots {
+      margin-left: 4px;
+    }
 
     footer {
       margin-top: auto;
@@ -619,7 +730,19 @@
     </div>
   </div>
 
-  <div id="spinner" class="spinner"></div>
+  <!-- Time-travel loading screen -->
+  <div id="loading-screen" class="loading-screen">
+    <div class="starfield" id="starfield">
+      <div class="rocket-container">🚀</div>
+      <div class="year-counter" id="year-counter">2026</div>
+      <div class="year-label">Traveling to…</div>
+    </div>
+    <div class="fun-facts-bar">
+      <span class="fact-icon" id="fact-icon">🎵</span>
+      <span class="fact-text" id="fact-text">Searching through time…</span>
+    </div>
+    <div class="loading-status">Scanning your scrobble history<span class="loading-dots"><span></span><span></span><span></span></span></div>
+  </div>
   <div id="result" class="result-card"></div>
 
   <!-- Top tracks suggestions -->
@@ -657,7 +780,7 @@
     const searchInput = document.getElementById('search');
     const acList = document.getElementById('ac-list');
     const resultCard = document.getElementById('result');
-    const spinner = document.getElementById('spinner');
+    // spinner replaced by loading-screen
     const configBanner = document.getElementById('config-banner');
     const bannerMsg = document.getElementById('banner-msg');
     const usernameInput = document.getElementById('username-input');
@@ -678,6 +801,92 @@
     let currentResults = [];
     let configOk = false;
     let currentUsername = '';
+
+    // === Time-travel loading animation ===
+    const loadingScreen = document.getElementById('loading-screen');
+    const yearCounter = document.getElementById('year-counter');
+    const factText = document.getElementById('fact-text');
+    const factIcon = document.getElementById('fact-icon');
+    const starfield = document.getElementById('starfield');
+    let yearInterval = null;
+    let factInterval = null;
+    let starsGenerated = false;
+
+    const musicFacts = [
+      { icon: '🎸', text: 'The longest officially released song is "The Rise and Fall of Bossanova" at 13 hours, 23 minutes and 32 seconds.' },
+      { icon: '💿', text: 'The first CD pressed in the US was Bruce Springsteen\'s "Born in the U.S.A." in 1984.' },
+      { icon: '🎵', text: 'The first MP3 ever created was Suzanne Vega\'s "Tom\'s Diner" — used as a test track by the format\'s inventor.' },
+      { icon: '📻', text: 'The first song played on MTV was "Video Killed the Radio Star" by The Buggles on August 1, 1981.' },
+      { icon: '🎹', text: '"Happy Birthday" was copyrighted until 2016 — for decades, restaurants had to pay royalties to sing it.' },
+      { icon: '🎤', text: 'Freddie Mercury\'s vocal range spanned four octaves, from bass low F to soprano high F.' },
+      { icon: '🥁', text: 'A vinyl record can hold about 22 minutes of music per side — that\'s why classic albums are ~44 minutes.' },
+      { icon: '🎧', text: 'Spotify\'s most-streamed song ever is "Blinding Lights" by The Weeknd with over 4 billion streams.' },
+      { icon: '🎷', text: 'The saxophone was invented in 1846 by Adolphe Sax, a Belgian instrument maker.' },
+      { icon: '🎻', text: 'A Stradivarius violin from 1721 sold for $15.9 million — the most expensive instrument ever.' },
+      { icon: '📀', text: 'Michael Jackson\'s "Thriller" remains the best-selling album of all time with 70 million copies sold.' },
+      { icon: '🎶', text: 'The shortest song ever recorded is "You Suffer" by Napalm Death at 1.316 seconds.' },
+      { icon: '🎺', text: 'Louis Armstrong\'s "What a Wonderful World" was a flop in the US but #1 in the UK when released in 1967.' },
+      { icon: '🪕', text: 'The banjo originated in Africa and was brought to the Americas by enslaved people in the 17th century.' },
+      { icon: '🎵', text: 'Last.fm has tracked over 100 billion scrobbles since its launch in 2002.' },
+      { icon: '🌍', text: 'Finland has the most metal bands per capita — about 54 metal bands per 100,000 people.' },
+      { icon: '🎸', text: 'Jimi Hendrix was self-taught and played a right-handed guitar flipped upside down.' },
+      { icon: '🎤', text: 'The word "rhythm" is the longest English word without a vowel.' },
+      { icon: '💿', text: 'Pink Floyd\'s "The Dark Side of the Moon" spent 937 weeks on the Billboard 200 chart.' },
+      { icon: '🎧', text: 'The first online music store was eMusic, launched in 1998 — five years before iTunes.' },
+    ];
+
+    function generateStars() {
+      if (starsGenerated) return;
+      starsGenerated = true;
+      for (let i = 0; i < 40; i++) {
+        const star = document.createElement('div');
+        star.className = 'star';
+        const size = Math.random() * 2.5 + 1;
+        star.style.width = size + 'px';
+        star.style.height = size + 'px';
+        star.style.top = Math.random() * 100 + '%';
+        star.style.right = '-10px';
+        star.style.setProperty('--dur', (Math.random() * 2 + 1.5) + 's');
+        star.style.animationDelay = Math.random() * 3 + 's';
+        starfield.appendChild(star);
+      }
+    }
+
+    function startLoadingAnimation() {
+      generateStars();
+      loadingScreen.classList.add('show');
+      // Year countdown
+      let year = new Date().getFullYear();
+      yearCounter.textContent = year;
+      yearInterval = setInterval(() => {
+        year -= Math.floor(Math.random() * 3) + 1;
+        if (year < 1950) year = new Date().getFullYear();
+        yearCounter.textContent = year;
+      }, 600);
+      // Fun facts rotation
+      let lastIdx = -1;
+      function showRandomFact() {
+        let idx;
+        do { idx = Math.floor(Math.random() * musicFacts.length); } while (idx === lastIdx);
+        lastIdx = idx;
+        const f = musicFacts[idx];
+        factIcon.textContent = f.icon;
+        factText.style.animation = 'none';
+        factText.offsetHeight; // trigger reflow
+        factText.style.animation = '';
+        factText.textContent = f.text;
+      }
+      showRandomFact();
+      factInterval = setInterval(showRandomFact, 3500);
+    }
+
+    function stopLoadingAnimation() {
+      loadingScreen.classList.remove('show');
+      clearInterval(yearInterval);
+      clearInterval(factInterval);
+      yearInterval = null;
+      factInterval = null;
+    }
 
     // Cookie helpers
     function setCookie(name, value, days = 365) {
@@ -935,14 +1144,14 @@
       hideAC();
       searchInput.value = `${track.name} — ${track.artist}`;
       resultCard.classList.remove('show');
-      spinner.classList.add('show');
+      startLoadingAnimation();
 
       try {
         const res = await fetch(
           `/api/first-listen?track=${encodeURIComponent(track.name)}&artist=${encodeURIComponent(track.artist)}&username=${encodeURIComponent(currentUsername)}`
         );
         const data = await res.json();
-        spinner.classList.remove('show');
+        stopLoadingAnimation();
 
         if (data.error) {
           showError(data.error);
@@ -955,14 +1164,18 @@
           return;
         }
 
-        const dateObj = data.timestamp ? new Date(data.timestamp * 1000) : null;
+        const dateUnavailable = Boolean(data.date_unavailable);
+        const dateObj = data.timestamp ? new Date(Number(data.timestamp) * 1000) : null;
         const niceDate = dateObj
           ? dateObj.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
-          : data.date;
+          : (dateUnavailable ? 'Unavailable' : data.date);
         const niceTime = dateObj
           ? dateObj.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
           : '';
-        const timeAgo = dateObj ? relativeTime(dateObj) : '';
+        const timeAgo = dateObj ? relativeTime(dateObj) : (dateUnavailable ? 'Not available' : '');
+        const dateNote = dateUnavailable
+          ? `${data.date_unavailable_reason || 'Last.fm does not expose the exact timestamp for this play.'} This can happen when the profile or recent tracks are private, or when Last.fm omits older low-play scrobbles from its public API.`
+          : '';
 
         const imgSrc = data.image || defaultAlbumArt();
 
@@ -981,6 +1194,7 @@
               <div>
                 <div class="stat-label">First listened on</div>
                 <div class="stat-value">${escHtml(niceDate)}${niceTime ? ' at ' + escHtml(niceTime) : ''}</div>
+                ${dateNote ? `<div class="stat-note">${escHtml(dateNote)}</div>` : ''}
               </div>
             </div>
             <div class="stat-row">
@@ -993,7 +1207,7 @@
             <div class="stat-row">
               <span class="stat-icon">🔁</span>
               <div>
-                <div class="stat-label">Total scrobbles</div>
+                <div class="stat-label">Track scrobbles</div>
                 <div class="stat-value">${data.total_scrobbles.toLocaleString()}</div>
               </div>
             </div>
@@ -1001,7 +1215,7 @@
         `;
         resultCard.classList.add('show');
       } catch (err) {
-        spinner.classList.remove('show');
+        stopLoadingAnimation();
         showError('Something went wrong. Please try again.');
       }
     }
