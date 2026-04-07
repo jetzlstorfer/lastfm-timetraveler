@@ -2,7 +2,9 @@
 
 import json
 import os
+import sqlite3
 import tempfile
+import time
 from unittest.mock import patch
 
 import pytest
@@ -545,7 +547,33 @@ class TestDatabaseCaching:
         mock_get.assert_not_called()
 
     @patch.object(app_module, "lastfm_get")
-    def test_cache_lookup_is_case_insensitive(self, mock_get, client):
+    def test_cache_hit_updates_queried_at(self, mock_get, client):
+        """A second call for the same track (served from cache) must refresh
+        queried_at so the track rises to the top of the lookup history."""
+        database.save_result(
+            "testuser", "Old Hit", "Classic Band",
+            "Greatest Hits",
+            "01 Jan 2005, 10:00", "1104573600",
+            50, "",
+        )
+        queried_at_before = database.get_cached("testuser", "Old Hit", "Classic Band")["queried_at"]
+
+        # Small sleep so the new timestamp is strictly greater
+        time.sleep(0.01)
+
+        resp = client.get("/api/first-listen?track=Old+Hit&artist=Classic+Band&username=testuser")
+        data = resp.get_json()
+
+        assert data["found"] is True
+        assert data["cached"] is True
+        mock_get.assert_not_called()
+
+        queried_at_after = database.get_cached("testuser", "Old Hit", "Classic Band")["queried_at"]
+        assert queried_at_after > queried_at_before, (
+            "queried_at must be updated on a cache hit so the track moves to the top of history"
+        )
+
+
         """Cache hit should work regardless of the casing used in the query."""
         database.save_result(
             "testuser", "Bohemian Rhapsody", "Queen",
@@ -608,4 +636,30 @@ class TestHistory:
         data2 = resp2.get_json()
         assert len(data2) == 1
         assert data2[0]["track"] == "Other Track"
+
+    def test_history_order_is_stable_with_same_timestamp(self, client, isolated_db):
+        """When two rows share an identical queried_at the higher id (newer insert)
+        must always come first — verified by querying repeatedly."""
+        fixed_ts = "2024-06-01T12:00:00+00:00"
+        with sqlite3.connect(isolated_db) as conn:
+            conn.execute(
+                "INSERT INTO searches (username, track, artist, album, first_listen_date, "
+                "first_listen_timestamp, total_scrobbles, image, queried_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("testuser", "Track Alpha", "Artist", "", "01 Jan 2010, 00:00", "1262304000", 1, "", fixed_ts),
+            )
+            conn.execute(
+                "INSERT INTO searches (username, track, artist, album, first_listen_date, "
+                "first_listen_timestamp, total_scrobbles, image, queried_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("testuser", "Track Beta", "Artist", "", "01 Jan 2011, 00:00", "1293840000", 1, "", fixed_ts),
+            )
+            conn.commit()
+
+        for _ in range(5):
+            resp = client.get("/api/history?username=testuser")
+            data = resp.get_json()
+            assert len(data) == 2
+            assert data[0]["track"] == "Track Beta", "Higher id must always sort first for equal timestamps"
+            assert data[1]["track"] == "Track Alpha"
 

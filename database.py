@@ -131,7 +131,7 @@ def get_history(username: str) -> list[dict]:
             """
             SELECT * FROM searches
             WHERE LOWER(username) = LOWER(?)
-            ORDER BY queried_at DESC
+            ORDER BY queried_at DESC, id DESC
             """,
             (username,),
         ).fetchall()

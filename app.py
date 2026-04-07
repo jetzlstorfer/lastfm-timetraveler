@@ -804,6 +804,16 @@ def first_listen():
         cached_timestamp = cached["first_listen_timestamp"] or ""
         cached_date = cached["first_listen_date"] or ""
         date_unavailable = not bool(cached_date)
+        db.save_result(
+            username,
+            cached["track"],
+            cached["artist"],
+            cached["album"] or "",
+            cached_date,
+            cached_timestamp,
+            cached["total_scrobbles"] or 0,
+            cached["image"] or "",
+        )
         finish_lookup_progress(
             lookup_id,
             username=username,
