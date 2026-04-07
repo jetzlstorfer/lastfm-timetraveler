@@ -436,6 +436,13 @@
       font-style: italic;
     }
 
+    .result-meta-note {
+      color: rgba(255, 255, 255, 0.56);
+      margin-top: 0.55rem;
+      font-size: 0.76rem;
+      letter-spacing: 0.04em;
+    }
+
     .result-body {
       padding: 0 1.5rem 1.5rem;
     }
@@ -555,6 +562,7 @@
       font-size: clamp(2rem, 5vw, 3.6rem);
       font-weight: 700;
       background: linear-gradient(90deg, #d51007, #ff6b6b);
+      background-clip: text;
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       color: #ff6b6b;
@@ -622,6 +630,23 @@
       margin-top: 0.85rem;
       text-align: center;
       font-size: 0.86rem;
+    }
+
+    .loading-elapsed {
+      margin-top: 0.35rem;
+      text-align: center;
+      color: rgba(255, 255, 255, 0.56);
+      font-size: 0.73rem;
+      letter-spacing: 0.04em;
+    }
+
+    .loading-detail {
+      max-width: 34rem;
+      margin: 0.45rem auto 0;
+      text-align: center;
+      color: rgba(255, 255, 255, 0.52);
+      font-size: 0.77rem;
+      line-height: 1.45;
     }
 
     .config-banner {
@@ -754,7 +779,7 @@
         <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div class="flex items-center gap-4">
             <span class="text-3xl sm:text-4xl">🕰️🧑‍🚀</span>
-            <h1 class="text-3xl font-bold leading-none sm:text-4xl lg:text-5xl" style="background:linear-gradient(90deg,#d51007,#ff6b6b);-webkit-background-clip:text;-webkit-text-fill-color:transparent">Last.fm Time Traveler</h1>
+            <h1 class="text-3xl font-bold leading-none sm:text-4xl lg:text-5xl" style="background:linear-gradient(90deg,#d51007,#ff6b6b);background-clip:text;-webkit-background-clip:text;-webkit-text-fill-color:transparent">Last.fm Time Traveler</h1>
           </div>
           <p class="max-w-lg text-sm leading-6 text-stone-400">
             Find the exact moment a track entered your listening history.
@@ -801,13 +826,15 @@
           <div class="rocket-container">🚀</div>
           <div class="year-counter" id="year-counter">2026</div>
           <div class="year-label">Traveling to</div>
-          <div class="travel-kicker">Scanning your scrobble history for the earliest confirmed listen.</div>
+          <div class="travel-kicker" id="travel-kicker">Scanning your scrobble history for the earliest confirmed listen.</div>
         </div>
         <div class="fun-facts-bar">
           <span class="fact-icon" id="fact-icon">🎵</span>
           <span class="fact-text" id="fact-text">Searching through time...</span>
         </div>
-        <div class="loading-status">Scanning your scrobble history<span class="loading-dots"><span></span><span></span><span></span></span></div>
+        <div class="loading-status"><span id="loading-status-text">Checking Last.fm track metadata</span><span class="loading-dots"><span></span><span></span><span></span></span></div>
+        <div class="loading-elapsed" id="loading-elapsed">Elapsed 0.0s</div>
+        <div class="loading-detail" id="loading-detail">Fast path first: one metadata lookup, then the public track page if Last.fm exposes it.</div>
       </div>
 
       <!-- Search result -->
@@ -907,9 +934,46 @@
     const factText = document.getElementById('fact-text');
     const factIcon = document.getElementById('fact-icon');
     const starfield = document.getElementById('starfield');
+    const travelKicker = document.getElementById('travel-kicker');
+    const loadingStatusText = document.getElementById('loading-status-text');
+    const loadingElapsed = document.getElementById('loading-elapsed');
+    const loadingDetail = document.getElementById('loading-detail');
     let yearInterval = null;
     let factInterval = null;
+    let loadingPhaseTimeouts = [];
+    let loadingElapsedInterval = null;
+    let loadingStartedAt = 0;
+    let latestProgressPercent = null;
+    let lookupProgressInterval = null;
+    let currentLookupId = '';
     let starsGenerated = false;
+
+    const loadingPhases = [
+      {
+        delay: 0,
+        status: 'Checking Last.fm track metadata',
+        kicker: 'Confirming the track exists in your listening history.',
+        detail: 'Fast path first: one metadata lookup to confirm the song and playcount.'
+      },
+      {
+        delay: 2500,
+        status: 'Trying the public track page',
+        kicker: 'Looking for an exact first-listen timestamp on Last.fm\'s public page.',
+        detail: 'If Last.fm exposes the track page publicly, this usually finishes quickly.'
+      },
+      {
+        delay: 7000,
+        status: 'Scanning older scrobbles',
+        kicker: 'The public page was not enough, so the app is walking older recent-track pages.',
+        detail: 'Fallback mode is active: Last.fm returns recent tracks in pages of 200 scrobbles, so the app is stepping backward page by page.'
+      },
+      {
+        delay: 14000,
+        status: 'Still scanning older pages',
+        kicker: 'Large libraries can take a while. This lookup will still be saved to history even if exact dating takes longer.',
+        detail: 'This is usually the slowest path. Check the server terminal for page-by-page scan logs and whether Last.fm redirected the public page to login.'
+      }
+    ];
 
     const musicFacts = [
       { icon: '🎸', text: 'The longest officially released song is "The Rise and Fall of Bossanova" at 13 hours, 23 minutes and 32 seconds.' },
@@ -955,15 +1019,110 @@
       }
     }
 
+    function resetLoadingPhases() {
+      loadingPhaseTimeouts.forEach((timeoutId) => clearTimeout(timeoutId));
+      loadingPhaseTimeouts = [];
+    }
+
+    function setLoadingPhase(phase) {
+      loadingStatusText.textContent = phase.status;
+      travelKicker.textContent = phase.kicker;
+      loadingDetail.textContent = phase.detail || '';
+      console.info('[lookup:phase]', phase.status, phase.detail || phase.kicker);
+    }
+
+    function formatElapsedMs(ms) {
+      if (ms == null || Number.isNaN(Number(ms))) return '';
+      const totalMs = Number(ms);
+      if (totalMs < 1000) return `${Math.max(1, Math.round(totalMs))} ms`;
+      return `${(totalMs / 1000).toFixed(totalMs < 10000 ? 1 : 0)} s`;
+    }
+
+    function formatLookupTime(data) {
+      const duration = formatElapsedMs(data.elapsed_ms);
+      if (!duration) return '';
+      return `Lookup time ${duration}${data.cached ? ' from cache' : ''}`;
+    }
+
+    function createLookupId() {
+      if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return window.crypto.randomUUID();
+      }
+      return `lookup-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+
+    function stopLookupProgressPolling() {
+      clearInterval(lookupProgressInterval);
+      lookupProgressInterval = null;
+      currentLookupId = '';
+      latestProgressPercent = null;
+    }
+
+    function applyLookupProgress(progress) {
+      if (!progress || !progress.found) return;
+      if (progress.status) {
+        loadingStatusText.textContent = progress.status;
+      }
+      if (progress.detail) {
+        loadingDetail.textContent = progress.detail;
+      }
+      latestProgressPercent = typeof progress.progress_percent === 'number'
+        ? progress.progress_percent
+        : null;
+      updateLoadingElapsed();
+      if (progress.active === false) {
+        stopLookupProgressPolling();
+      }
+    }
+
+    async function pollLookupProgress(lookupId) {
+      try {
+        const res = await fetch(`/api/lookup-progress?lookup_id=${encodeURIComponent(lookupId)}`);
+        const progress = await res.json();
+        applyLookupProgress(progress);
+      } catch {
+        // Keep the main lookup running even if the progress poll fails.
+      }
+    }
+
+    function startLookupProgressPolling(lookupId) {
+      stopLookupProgressPolling();
+      currentLookupId = lookupId;
+      pollLookupProgress(lookupId);
+      lookupProgressInterval = setInterval(() => pollLookupProgress(lookupId), 800);
+    }
+
+    function updateLoadingElapsed() {
+      const elapsed = performance.now() - loadingStartedAt;
+      let text = `Elapsed ${(elapsed / 1000).toFixed(1)}s`;
+      if (typeof latestProgressPercent === 'number') {
+        text += `, about ${latestProgressPercent}% of your history checked`;
+      }
+      loadingElapsed.textContent = text;
+    }
+
     function startLoadingAnimation() {
       generateStars();
       loadingScreen.classList.add('show');
+      resetLoadingPhases();
+      setLoadingPhase(loadingPhases[0]);
+      loadingStartedAt = performance.now();
+      latestProgressPercent = null;
+      loadingDetail.textContent = loadingPhases[0].detail || '';
+      updateLoadingElapsed();
+      clearInterval(loadingElapsedInterval);
+      loadingElapsedInterval = setInterval(updateLoadingElapsed, 100);
+
+      loadingPhases.slice(1).forEach((phase) => {
+        const timeoutId = setTimeout(() => setLoadingPhase(phase), phase.delay);
+        loadingPhaseTimeouts.push(timeoutId);
+      });
 
       let year = new Date().getFullYear();
       yearCounter.textContent = year;
       yearInterval = setInterval(() => {
         year = year - 1;
-        if (year < 1950) year = new Date().getFullYear();
+        if (year < 0) year = new Date().getFullYear();
         yearCounter.textContent = year;
       }, 1500);
 
@@ -990,8 +1149,12 @@
       loadingScreen.classList.remove('show');
       clearInterval(yearInterval);
       clearInterval(factInterval);
+      clearInterval(loadingElapsedInterval);
+      resetLoadingPhases();
+      stopLookupProgressPolling();
       yearInterval = null;
       factInterval = null;
+      loadingElapsedInterval = null;
     }
 
     function setCookie(name, value, days = 365) {
@@ -1270,12 +1433,23 @@
       hideAC();
       searchInput.value = `${track.name} — ${track.artist}`;
       resultCard.classList.remove('show');
+      const lookupId = createLookupId();
+      console.info('[lookup:start]', { username: currentUsername, track: track.name, artist: track.artist });
       startLoadingAnimation();
+      startLookupProgressPolling(lookupId);
 
       try {
-        const res = await fetch(`/api/first-listen?track=${encodeURIComponent(track.name)}&artist=${encodeURIComponent(track.artist)}&username=${encodeURIComponent(currentUsername)}`);
+        const res = await fetch(`/api/first-listen?track=${encodeURIComponent(track.name)}&artist=${encodeURIComponent(track.artist)}&username=${encodeURIComponent(currentUsername)}&lookup_id=${encodeURIComponent(lookupId)}`);
         const data = await res.json();
         stopLoadingAnimation();
+        console.info('[lookup:done]', {
+          track: data.track || track.name,
+          artist: data.artist || track.artist,
+          found: data.found,
+          cached: data.cached,
+          elapsed_ms: data.elapsed_ms,
+          date_unavailable: data.date_unavailable,
+        });
 
         if (data.error) {
           showError(data.error);
@@ -1300,6 +1474,7 @@
         const dateNote = dateUnavailable
           ? `${data.date_unavailable_reason || 'Last.fm does not expose the exact timestamp for this play.'} This can happen when the profile or recent tracks are private, or when Last.fm omits older low-play scrobbles from its public API.`
           : '';
+        const lookupTime = formatLookupTime(data);
 
         const imageSrc = data.image || defaultAlbumArt();
         const resultNeedsArtistFallback = !data.image;
@@ -1311,6 +1486,7 @@
               <h2>${escHtml(data.track)}</h2>
               <div class="artist-name">${escHtml(data.artist)}</div>
               ${data.album ? `<div class="album-name">${escHtml(data.album)}</div>` : ''}
+              ${lookupTime ? `<div class="result-meta-note">${escHtml(lookupTime)}</div>` : ''}
             </div>
           </div>
           <div class="result-body">
@@ -1344,6 +1520,7 @@
         }
       } catch {
         stopLoadingAnimation();
+        console.error('[lookup:error]', { username: currentUsername, track: track.name, artist: track.artist });
         showError('Something went wrong. Please try again.');
       }
     }

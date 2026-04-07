@@ -18,6 +18,8 @@ def isolated_db(tmp_path):
     db_file = str(tmp_path / "test.db")
     with patch.object(database, "DB_PATH", db_file):
         database.init_db()
+        with app_module.LOOKUP_PROGRESS_LOCK:
+            app_module.LOOKUP_PROGRESS.clear()
         yield db_file
 
 
@@ -187,6 +189,39 @@ class TestSearch:
 
 
 # ---------------------------------------------------------------------------
+# /api/lookup-progress
+# ---------------------------------------------------------------------------
+
+class TestLookupProgress:
+    def test_lookup_progress_requires_lookup_id(self, client):
+        resp = client.get("/api/lookup-progress")
+        assert resp.status_code == 400
+
+    def test_lookup_progress_returns_page_percentage(self, client):
+        app_module.update_lookup_progress(
+            "lookup-123",
+            username="testuser",
+            artist="Wanda",
+            track="Bologna",
+            stage="recent-track-fallback",
+            status="Still scanning older pages",
+            detail="Checked 12 of 48 recent-track pages while walking backward through your history.",
+            pages_checked=12,
+            pages_total=48,
+        )
+
+        resp = client.get("/api/lookup-progress?lookup_id=lookup-123")
+        data = resp.get_json()
+
+        assert resp.status_code == 200
+        assert data["found"] is True
+        assert data["pages_checked"] == 12
+        assert data["pages_total"] == 48
+        assert data["progress_percent"] == 25
+        assert data["status"] == "Still scanning older pages"
+
+
+# ---------------------------------------------------------------------------
 # /api/first-listen
 # ---------------------------------------------------------------------------
 
@@ -236,6 +271,9 @@ class TestFirstListen:
         assert data["timestamp"] == "1167766200"
         assert data["date_unavailable"] is False
         assert data["image"] == "https://img.example/cover.jpg"
+        assert data["cached"] is False
+        assert isinstance(data["elapsed_ms"], int)
+        assert data["elapsed_ms"] >= 0
 
     @patch.object(app_module, "lastfm_get")
     def test_no_chart_history_returns_error(self, mock_get, client):
@@ -258,6 +296,35 @@ class TestFirstListen:
         assert data["timestamp"] == ""
         assert data["date_unavailable"] is True
         assert "exact first-listen timestamp" in data["date_unavailable_reason"].lower()
+
+    @patch.object(app_module, "recent_tracks_first_listen")
+    @patch.object(app_module, "public_library_first_listen_date")
+    @patch.object(app_module, "lastfm_get")
+    def test_partial_lookup_is_saved_before_slow_resolution_finishes(
+        self, mock_get, mock_public_date, mock_recent_first_listen, client
+    ):
+        mock_get.return_value = _track_info_response(
+            userplaycount=73,
+            track="Bologna",
+            artist="Wanda",
+            album="Amore",
+            image_url="https://img.example/bologna.jpg",
+        )
+        mock_public_date.return_value = None
+        mock_recent_first_listen.side_effect = RuntimeError("scan aborted")
+
+        with pytest.raises(RuntimeError, match="scan aborted"):
+            client.get(
+                "/api/first-listen?track=Bologna&artist=Wanda&username=testuser"
+            )
+
+        cached = database.get_cached("testuser", "Bologna", "Wanda")
+        assert cached is not None
+        assert cached["album"] == "Amore"
+        assert cached["total_scrobbles"] == 73
+        assert cached["image"] == "https://img.example/bologna.jpg"
+        assert cached["first_listen_date"] == ""
+        assert cached["first_listen_timestamp"] == ""
 
     @patch.object(app_module, "public_library_first_listen_date")
     @patch.object(app_module, "lastfm_get")
@@ -415,7 +482,9 @@ class TestDatabaseCaching:
         resp = client.get("/api/first-listen?track=Cached+Song&artist=Artist&username=testuser")
         data = resp.get_json()
         assert data["found"] is True
-        assert data.get("cached") is None  # first hit is not from cache
+        assert data["cached"] is False
+        assert isinstance(data["elapsed_ms"], int)
+        assert data["elapsed_ms"] >= 0
 
         # Verify it was stored
         stored = database.get_cached("testuser", "Cached Song", "Artist")
@@ -446,7 +515,9 @@ class TestDatabaseCaching:
 
         assert data["found"] is True
         # Should NOT come from cache — a fresh API call should be made
-        assert data.get("cached") is None
+        assert data["cached"] is False
+        assert isinstance(data["elapsed_ms"], int)
+        assert data["elapsed_ms"] >= 0
         assert data["date_unavailable"] is True
 
     @patch.object(app_module, "lastfm_get")
@@ -468,6 +539,8 @@ class TestDatabaseCaching:
         assert data["track"] == "Lazy Song"
         assert data["date"] == "01 May 2011, 14:00"
         assert data["total_scrobbles"] == 88
+        assert isinstance(data["elapsed_ms"], int)
+        assert data["elapsed_ms"] >= 0
         # The Last.fm API must not have been called at all
         mock_get.assert_not_called()
 
@@ -486,6 +559,8 @@ class TestDatabaseCaching:
 
         assert data["found"] is True
         assert data["cached"] is True
+        assert isinstance(data["elapsed_ms"], int)
+        assert data["elapsed_ms"] >= 0
         mock_get.assert_not_called()
 
 

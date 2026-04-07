@@ -87,8 +87,8 @@ To set up federated credentials (OIDC) for the service principal, follow the [az
 
 - **Autocomplete** uses Last.fm's `track.search` API
 - **First listen** uses a binary search over `user.getWeeklyTrackChart` to locate the earliest week, then `user.getRecentTracks` to find the exact scrobble date
-- **Caching** — resolved first-listen results are stored in a local SQLite database (`timetraveler.db`). Repeated queries for the same track are served instantly from the cache without hitting the Last.fm API again
-- **History** — the `/api/history` endpoint returns all previously resolved lookups for the configured user
+- **Caching** — confirmed lookups are written to the local SQLite database (`timetraveler.db`) as soon as the app knows the track exists, then updated again if the exact first-listen timestamp is found
+- **History** — the `/api/history` endpoint returns cached lookups for the configured user, including partial results whose exact first-listen date could not be resolved yet
 - Built with **Flask** (backend) and vanilla **HTML/CSS/JS** (frontend)
 
 ### Database

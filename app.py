@@ -1,6 +1,8 @@
 import os
 import re
 import time
+import logging
+from threading import Lock
 from math import ceil
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
@@ -13,6 +15,7 @@ import database as db
 load_dotenv()
 
 app = Flask(__name__, static_folder="static")
+app.logger.setLevel(logging.INFO)
 
 with app.app_context():
     db.init_db()
@@ -21,6 +24,8 @@ LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
 LASTFM_BASE = "https://ws.audioscrobbler.com/2.0/"
 LIBRARY_PAGE_SIZE = 50
 RECENT_TRACKS_PAGE_SIZE = 200
+LOOKUP_PROGRESS_TTL_SECONDS = 15 * 60
+LOOKUP_PROGRESS_DONE_TTL_SECONDS = 5 * 60
 TRACK_PAGE_DATE_RE = re.compile(
     r'<span title="(?:[A-Z][a-z]+ )?([0-9]{1,2} [A-Z][a-z]{2} [0-9]{4}, [0-9]{1,2}:[0-9]{2}(?:am|pm))">'
 )
@@ -29,6 +34,8 @@ TRACK_PAGE_PAGINATION_RE = re.compile(r'href="\?page=(\d+)"')
 
 # Last.fm returns this hash for the default "star" placeholder — treat as no image
 LASTFM_PLACEHOLDER_HASH = "2a96cbd8b46e442fc41c2b86b821562f"
+LOOKUP_PROGRESS: dict[str, dict] = {}
+LOOKUP_PROGRESS_LOCK = Lock()
 
 
 def is_placeholder(url: str) -> bool:
@@ -66,6 +73,79 @@ def extract_artist_name(value) -> str:
     if isinstance(value, dict):
         return value.get("#text") or value.get("name", "")
     return str(value or "")
+
+
+def lookup_context(username: str, artist: str, track: str) -> str:
+    return f"user={username!r} artist={artist!r} track={track!r}"
+
+
+def cleanup_lookup_progress(now: float | None = None) -> None:
+    now = now or time.time()
+    stale_lookup_ids = []
+    for lookup_id, payload in LOOKUP_PROGRESS.items():
+        updated_at = payload.get("updated_at", now)
+        ttl = (
+            LOOKUP_PROGRESS_DONE_TTL_SECONDS
+            if payload.get("active") is False
+            else LOOKUP_PROGRESS_TTL_SECONDS
+        )
+        if now - updated_at > ttl:
+            stale_lookup_ids.append(lookup_id)
+
+    for lookup_id in stale_lookup_ids:
+        LOOKUP_PROGRESS.pop(lookup_id, None)
+
+
+def progress_percent(pages_checked: int | None, pages_total: int | None) -> int | None:
+    if not pages_checked or not pages_total:
+        return None
+    if pages_total <= 0:
+        return None
+    return max(0, min(100, round((pages_checked / pages_total) * 100)))
+
+
+def update_lookup_progress(lookup_id: str | None, **fields) -> None:
+    if not lookup_id:
+        return
+
+    now = time.time()
+    with LOOKUP_PROGRESS_LOCK:
+        cleanup_lookup_progress(now)
+        payload = LOOKUP_PROGRESS.get(lookup_id, {}).copy()
+        payload.update(fields)
+        payload["lookup_id"] = lookup_id
+        payload["updated_at"] = now
+        payload.setdefault("created_at", now)
+        payload.setdefault("active", True)
+
+        pages_checked = payload.get("pages_checked")
+        pages_total = payload.get("pages_total")
+        payload["progress_percent"] = progress_percent(pages_checked, pages_total)
+        LOOKUP_PROGRESS[lookup_id] = payload
+
+
+def finish_lookup_progress(lookup_id: str | None, **fields) -> None:
+    update_lookup_progress(lookup_id, active=False, **fields)
+
+
+def get_lookup_progress_payload(lookup_id: str | None) -> dict | None:
+    if not lookup_id:
+        return None
+
+    with LOOKUP_PROGRESS_LOCK:
+        cleanup_lookup_progress()
+        payload = LOOKUP_PROGRESS.get(lookup_id)
+        return payload.copy() if payload else None
+
+
+def should_log_page_progress(page: int, total_pages: int) -> bool:
+    if total_pages <= 10:
+        return True
+    if page in {1, total_pages}:
+        return True
+    if page <= 3 or page > total_pages - 3:
+        return True
+    return page % 10 == 0
 
 
 def scrobble_matches_track(scrobble: dict, track: str, artist: str) -> bool:
@@ -119,7 +199,9 @@ def earliest_scrobble_on_page(scrobbles, track: str, artist: str) -> tuple[str, 
     return matches[0]["date"], matches[0]["timestamp"]
 
 
-def recent_tracks_history_summary(username: str, track: str, artist: str) -> dict | None:
+def recent_tracks_history_summary(
+    username: str, track: str, artist: str, lookup_id: str | None = None
+) -> dict | None:
     """Scan recent-track history and return the first play plus the total match count."""
 
     first_page = lastfm_get(
@@ -130,11 +212,26 @@ def recent_tracks_history_summary(username: str, track: str, artist: str) -> dic
     )
     recenttracks = first_page.get("recenttracks", {})
     total_pages = int(recenttracks.get("@attr", {}).get("totalPages", 1) or 1)
+    app.logger.info(
+        "recent-track summary scan started %s total_pages=%s page_size=%s",
+        lookup_context(username, artist, track),
+        total_pages,
+        RECENT_TRACKS_PAGE_SIZE,
+    )
+    update_lookup_progress(
+        lookup_id,
+        stage="recent-track-summary",
+        status="Scanning recent-track pages for play count",
+        detail="Last.fm did not report a track playcount, so the app is deriving it from recent-track pages.",
+        pages_checked=0,
+        pages_total=total_pages,
+    )
 
     first_match = None
     total_matches = 0
 
     for page in range(total_pages, 0, -1):
+        pages_checked = total_pages - page + 1
         data = first_page
         if page != 1:
             data = lastfm_get(
@@ -147,6 +244,25 @@ def recent_tracks_history_summary(username: str, track: str, artist: str) -> dic
         page_matches = matching_scrobbles_on_page(
             data.get("recenttracks", {}).get("track", []), track, artist
         )
+        if page_matches or should_log_page_progress(page, total_pages):
+            app.logger.info(
+                "recent-track summary progress %s page=%s/%s matches_on_page=%s total_matches=%s",
+                lookup_context(username, artist, track),
+                page,
+                total_pages,
+                len(page_matches),
+                total_matches + len(page_matches),
+            )
+        update_lookup_progress(
+            lookup_id,
+            stage="recent-track-summary",
+            status="Scanning recent-track pages for play count",
+            detail=(
+                f"Checked {pages_checked} of {total_pages} recent-track pages while estimating track history."
+            ),
+            pages_checked=pages_checked,
+            pages_total=total_pages,
+        )
         if not page_matches:
             continue
 
@@ -155,8 +271,38 @@ def recent_tracks_history_summary(username: str, track: str, artist: str) -> dic
         total_matches += len(page_matches)
 
     if not first_match:
+        app.logger.info(
+            "recent-track summary scan finished with no matches %s total_pages=%s",
+            lookup_context(username, artist, track),
+            total_pages,
+        )
+        finish_lookup_progress(
+            lookup_id,
+            stage="recent-track-summary-finished",
+            status="Recent-track summary finished",
+            detail="No matching scrobbles were found while estimating the track history.",
+            pages_checked=total_pages,
+            pages_total=total_pages,
+        )
         return None
 
+    app.logger.info(
+        "recent-track summary scan found earliest match %s timestamp=%s total_matches=%s",
+        lookup_context(username, artist, track),
+        first_match["timestamp"],
+        total_matches,
+    )
+
+    update_lookup_progress(
+        lookup_id,
+        stage="recent-track-summary-finished",
+        status="Recent-track summary finished",
+        detail=(
+            f"Checked all {total_pages} recent-track pages and found {total_matches} matching scrobbles."
+        ),
+        pages_checked=total_pages,
+        pages_total=total_pages,
+    )
     return {
         "track": first_match["track"],
         "artist": first_match["artist"],
@@ -167,7 +313,7 @@ def recent_tracks_history_summary(username: str, track: str, artist: str) -> dic
 
 
 def recent_tracks_first_listen(
-    username: str, track: str, artist: str
+    username: str, track: str, artist: str, lookup_id: str | None = None
 ) -> tuple[str, str] | tuple[None, None]:
     """Find the first play by scanning paginated recent tracks from oldest to newest."""
 
@@ -179,8 +325,23 @@ def recent_tracks_first_listen(
     )
     recenttracks = first_page.get("recenttracks", {})
     total_pages = int(recenttracks.get("@attr", {}).get("totalPages", 1) or 1)
+    app.logger.info(
+        "recent-track fallback scan started %s total_pages=%s page_size=%s",
+        lookup_context(username, artist, track),
+        total_pages,
+        RECENT_TRACKS_PAGE_SIZE,
+    )
+    update_lookup_progress(
+        lookup_id,
+        stage="recent-track-fallback",
+        status="Scanning older pages",
+        detail="Fallback mode is active: the app is stepping backward through recent-track pages to find the earliest exact scrobble.",
+        pages_checked=0,
+        pages_total=total_pages,
+    )
 
     for page in range(total_pages, 0, -1):
+        pages_checked = total_pages - page + 1
         data = first_page
         if page != 1:
             data = lastfm_get(
@@ -193,14 +354,64 @@ def recent_tracks_first_listen(
         match = earliest_scrobble_on_page(
             data.get("recenttracks", {}).get("track", []), track, artist
         )
+        if match or should_log_page_progress(page, total_pages):
+            app.logger.info(
+                "recent-track fallback progress %s page=%s/%s match_found=%s",
+                lookup_context(username, artist, track),
+                page,
+                total_pages,
+                bool(match),
+            )
+        update_lookup_progress(
+            lookup_id,
+            stage="recent-track-fallback",
+            status="Still scanning older pages",
+            detail=(
+                f"Checked {pages_checked} of {total_pages} recent-track pages while walking backward through your history."
+            ),
+            pages_checked=pages_checked,
+            pages_total=total_pages,
+        )
         if match:
+            app.logger.info(
+                "recent-track fallback resolved first listen %s timestamp=%s",
+                lookup_context(username, artist, track),
+                match[1],
+            )
+            finish_lookup_progress(
+                lookup_id,
+                stage="recent-track-fallback-finished",
+                status="Older page scan finished",
+                detail=(
+                    f"Found a matching scrobble after checking {pages_checked} of {total_pages} recent-track pages."
+                ),
+                pages_checked=pages_checked,
+                pages_total=total_pages,
+            )
             return match
 
+    app.logger.info(
+        "recent-track fallback finished with no exact match %s total_pages=%s",
+        lookup_context(username, artist, track),
+        total_pages,
+    )
+    finish_lookup_progress(
+        lookup_id,
+        stage="recent-track-fallback-finished",
+        status="Older page scan finished",
+        detail=f"Checked all {total_pages} recent-track pages without finding an exact match.",
+        pages_checked=total_pages,
+        pages_total=total_pages,
+    )
     return None, None
 
 
 def public_library_first_listen_date(
-    username: str, artist: str, track: str, total_scrobbles: int
+    username: str,
+    artist: str,
+    track: str,
+    total_scrobbles: int,
+    lookup_id: str | None = None,
 ) -> str | None:
     """Scrape the public track page from Last.fm and return the oldest scrobble date.
 
@@ -213,29 +424,120 @@ def public_library_first_listen_date(
         f"{quote(artist, safe='')}/_/{quote(track, safe='')}"
     )
     headers = {"User-Agent": "lastfm-timetraveler/1.0"}
+    context = lookup_context(username, artist, track)
+
+    app.logger.info(
+        "public track page lookup started %s total_scrobbles=%s",
+        context,
+        total_scrobbles,
+    )
+    update_lookup_progress(
+        lookup_id,
+        stage="public-track-page",
+        status="Trying the public track page",
+        detail="Checking whether Last.fm exposes the oldest visible scrobble on the public track page.",
+        pages_checked=None,
+        pages_total=None,
+    )
 
     resp = requests.get(base_url, headers=headers, timeout=20)
     if resp.status_code == 404:
+        app.logger.info("public track page returned 404 %s", context)
+        update_lookup_progress(
+            lookup_id,
+            stage="public-track-page",
+            status="Public track page unavailable",
+            detail="The public track page returned 404, so the app will fall back to recent-track scanning if needed.",
+        )
         return None
     resp.raise_for_status()
+    if resp.history or "/login" in resp.url:
+        app.logger.info(
+            "public track page redirected before parsing %s final_url=%s; falling back to recent tracks",
+            context,
+            resp.url,
+        )
+        update_lookup_progress(
+            lookup_id,
+            stage="public-track-page",
+            status="Public track page requires login",
+            detail="Last.fm redirected the older public track page to login, so the app has to scan recent-track pages instead.",
+        )
+        return None
 
     page_count = max(
         [int(m) for m in TRACK_PAGE_PAGINATION_RE.findall(resp.text)] or [1]
     )
     if total_scrobbles > 0:
         page_count = max(page_count, ceil(total_scrobbles / LIBRARY_PAGE_SIZE))
+    app.logger.info(
+        "public track page parsed %s inferred_page_count=%s",
+        context,
+        page_count,
+    )
+    update_lookup_progress(
+        lookup_id,
+        stage="public-track-page",
+        status="Trying the public track page",
+        detail=(
+            f"The public track page suggests about {page_count} pages of scrobbles for this track."
+        ),
+    )
 
     last_page_html = resp.text
     if page_count > 1:
-        last_resp = requests.get(
-            f"{base_url}?page={page_count}", headers=headers, timeout=20
+        last_page_url = f"{base_url}?page={page_count}"
+        app.logger.info(
+            "public track page fetching oldest visible page %s page=%s",
+            context,
+            page_count,
         )
+        update_lookup_progress(
+            lookup_id,
+            stage="public-track-page",
+            status="Trying the public track page",
+            detail=f"Fetching public track page {page_count} to look for the oldest visible scrobble.",
+        )
+        last_resp = requests.get(last_page_url, headers=headers, timeout=20)
         last_resp.raise_for_status()
+        if last_resp.history or "/login" in last_resp.url or last_resp.url != last_page_url:
+            app.logger.info(
+                "public track page redirected while fetching oldest visible page %s requested_url=%s final_url=%s; falling back to recent tracks",
+                context,
+                last_page_url,
+                last_resp.url,
+            )
+            update_lookup_progress(
+                lookup_id,
+                stage="public-track-page",
+                status="Public track page requires login",
+                detail="Last.fm redirected the older public track page to login, so the app has to scan recent-track pages instead.",
+            )
+            return None
         last_page_html = last_resp.text
 
     matches = TRACK_PAGE_DATE_RE.findall(last_page_html)
     if not matches:
+        app.logger.info("public track page exposed no dated scrobbles %s", context)
+        update_lookup_progress(
+            lookup_id,
+            stage="public-track-page",
+            status="Public track page has no dated scrobbles",
+            detail="The public track page loaded, but it did not expose the oldest exact timestamp needed for this lookup.",
+        )
         return None
+
+    app.logger.info(
+        "public track page resolved earliest visible scrobble %s date=%s",
+        context,
+        matches[-1],
+    )
+    update_lookup_progress(
+        lookup_id,
+        stage="public-track-page-finished",
+        status="Public track page resolved",
+        detail=f"Found an earliest visible scrobble on the public track page: {matches[-1]}.",
+    )
 
     return matches[-1]
 
@@ -440,22 +742,79 @@ def search_tracks():
     return jsonify(results)
 
 
+@app.route("/api/lookup-progress")
+def lookup_progress():
+    lookup_id = request.args.get("lookup_id", "").strip()
+    if not lookup_id:
+        return jsonify({"error": "lookup_id is required"}), 400
+
+    payload = get_lookup_progress_payload(lookup_id)
+    if not payload:
+        return jsonify({"found": False}), 200
+
+    return jsonify({"found": True, **payload})
+
+
 @app.route("/api/first-listen")
 def first_listen():
     """Find the very first scrobble of a track for the given user."""
+    started_at = time.perf_counter()
+
+    def elapsed_ms() -> int:
+        return int((time.perf_counter() - started_at) * 1000)
+
+    lookup_id = request.args.get("lookup_id", "").strip() or None
     track = request.args.get("track", "").strip()
     artist = request.args.get("artist", "").strip()
     username = request.args.get("username", "").strip()
+    if track and artist and username:
+        app.logger.info("lookup request started %s", lookup_context(username, artist, track))
+        update_lookup_progress(
+            lookup_id,
+            username=username,
+            artist=artist,
+            track=track,
+            stage="request-started",
+            status="Checking Last.fm track metadata",
+            detail="Starting lookup and checking basic track metadata.",
+            pages_checked=None,
+            pages_total=None,
+        )
     if not track or not artist or not username:
-        return jsonify({"error": "track, artist, and username are required"}), 400
+        finish_lookup_progress(
+            lookup_id,
+            stage="request-invalid",
+            status="Lookup failed",
+            detail="The lookup request is missing the required track, artist, or username.",
+        )
+        return jsonify({
+            "error": "track, artist, and username are required",
+            "elapsed_ms": elapsed_ms(),
+        }), 400
 
     # Return cached result immediately if available (first-listen date never changes)
     # Skip cache entries that have no date — those are transient failures worth retrying.
     cached = db.get_cached(username, track, artist)
     if cached and cached.get("first_listen_date"):
+        app.logger.info(
+            "lookup served from cache %s elapsed_ms=%s",
+            lookup_context(username, artist, track),
+            elapsed_ms(),
+        )
         cached_timestamp = cached["first_listen_timestamp"] or ""
         cached_date = cached["first_listen_date"] or ""
         date_unavailable = not bool(cached_date)
+        finish_lookup_progress(
+            lookup_id,
+            username=username,
+            artist=cached["artist"],
+            track=cached["track"],
+            stage="cache-hit",
+            status="Loaded from cache",
+            detail="This lookup was already cached locally, so no page scan was needed.",
+            pages_checked=1,
+            pages_total=1,
+        )
         return jsonify(
             {
                 "found": True,
@@ -473,6 +832,7 @@ def first_listen():
                     else ""
                 ),
                 "cached": True,
+                "elapsed_ms": elapsed_ms(),
             }
         )
 
@@ -482,29 +842,73 @@ def first_listen():
             "track.getInfo", track=track, artist=artist, username=username
         )
     except requests.HTTPError:
-        return jsonify({"error": "Last.fm API error"}), 502
+        finish_lookup_progress(
+            lookup_id,
+            username=username,
+            artist=artist,
+            track=track,
+            stage="request-error",
+            status="Lookup failed",
+            detail="Last.fm returned an API error while loading track metadata.",
+        )
+        return jsonify({"error": "Last.fm API error", "elapsed_ms": elapsed_ms()}), 502
 
     track_info = info.get("track", {})
     history_summary = None
     userplaycount = track_info.get("userplaycount")
     total = int(userplaycount or 0)
+    app.logger.info(
+        "track metadata loaded %s userplaycount=%s",
+        lookup_context(username, artist, track),
+        userplaycount,
+    )
+    update_lookup_progress(
+        lookup_id,
+        username=username,
+        artist=artist,
+        track=track,
+        stage="track-metadata-loaded",
+        status="Checking Last.fm track metadata",
+        detail=(
+            f"Last.fm reports {total} scrobbles for this track." if total else "Track metadata loaded."
+        ),
+    )
 
     if userplaycount in (None, ""):
         try:
-            history_summary = recent_tracks_history_summary(username, track, artist)
+            history_summary = recent_tracks_history_summary(username, track, artist, lookup_id)
         except requests.RequestException:
             history_summary = None
 
         if history_summary:
             total = history_summary["total_scrobbles"]
+            app.logger.info(
+                "derived playcount from recent-track summary %s total_scrobbles=%s",
+                lookup_context(username, artist, track),
+                total,
+            )
 
     if total == 0:
+        app.logger.info("lookup found no scrobbles %s", lookup_context(username, artist, track))
+        finish_lookup_progress(
+            lookup_id,
+            username=username,
+            artist=artist,
+            track=track,
+            stage="lookup-finished",
+            status="No matching scrobbles",
+            detail="Last.fm does not report any scrobbles for this track under this user.",
+            pages_checked=1,
+            pages_total=1,
+        )
         return jsonify(
             {
                 "found": False,
                 "track": track,
                 "artist": artist,
                 "message": "You have never listened to this track.",
+                "cached": False,
+                "elapsed_ms": elapsed_ms(),
             }
         )
 
@@ -529,9 +933,29 @@ def first_listen():
         canonical_artist = history_summary["artist"] or canonical_artist
 
     if not exact_date:
+        # Save the confirmed lookup metadata before the slower date-resolution
+        # fallbacks so the search still appears in history if the request takes
+        # a long time or is interrupted.
+        app.logger.info(
+            "saving partial lookup before slow date resolution %s total_scrobbles=%s",
+            lookup_context(username, canonical_artist, canonical_track),
+            total,
+        )
+        db.save_result(
+            username,
+            canonical_track,
+            canonical_artist,
+            album_name,
+            "",
+            "",
+            total,
+            image_url,
+        )
+
+    if not exact_date:
         try:
             exact_date = public_library_first_listen_date(
-                username, canonical_artist, canonical_track, total
+                username, canonical_artist, canonical_track, total, lookup_id
             )
             if exact_date:
                 exact_ts = lastfm_library_date_to_timestamp(exact_date)
@@ -539,19 +963,41 @@ def first_listen():
             date_unavailable_reason = (
                 "The public Last.fm track page could not be fetched, so the exact first-listen timestamp could not be determined."
             )
+            update_lookup_progress(
+                lookup_id,
+                stage="public-track-page-error",
+                status="Public track page failed",
+                detail="The public track page request failed, so the app is switching to recent-track scanning.",
+            )
         except ValueError:
             date_unavailable_reason = (
                 "The public Last.fm track page exposed a date, but it could not be converted into a timestamp."
             )
+            update_lookup_progress(
+                lookup_id,
+                stage="public-track-page-error",
+                status="Public track page parsing failed",
+                detail="The public page exposed a date, but the timestamp could not be parsed cleanly.",
+            )
 
     if not exact_date:
         try:
+            app.logger.info(
+                "falling back to recent-track scan %s",
+                lookup_context(username, canonical_artist, canonical_track),
+            )
             exact_date, exact_ts = recent_tracks_first_listen(
-                username, canonical_track, canonical_artist
+                username, canonical_track, canonical_artist, lookup_id
             )
         except requests.RequestException:
             date_unavailable_reason = (
                 "The accessible Last.fm listening history could not be fetched, so the exact first-listen timestamp could not be determined."
+            )
+            update_lookup_progress(
+                lookup_id,
+                stage="recent-track-fallback-error",
+                status="Older page scan failed",
+                detail="The recent-track scan failed while walking backward through the listening history.",
             )
 
     if not exact_date:
@@ -572,6 +1018,29 @@ def first_listen():
         total,
         image_url,
     )
+    app.logger.info(
+        "lookup finished %s date_found=%s cached=%s elapsed_ms=%s",
+        lookup_context(username, canonical_artist, canonical_track),
+        bool(exact_date),
+        False,
+        elapsed_ms(),
+    )
+    current_progress = get_lookup_progress_payload(lookup_id) or {}
+    finish_lookup_progress(
+        lookup_id,
+        username=username,
+        artist=canonical_artist,
+        track=canonical_track,
+        stage="lookup-finished",
+        status="Lookup finished",
+        detail=(
+            "Found the earliest exact scrobble timestamp."
+            if exact_date
+            else "The lookup finished, but Last.fm did not expose an exact first-listen timestamp."
+        ),
+        pages_checked=current_progress.get("pages_checked"),
+        pages_total=current_progress.get("pages_total"),
+    )
 
     return jsonify(
         {
@@ -585,6 +1054,8 @@ def first_listen():
             "image": image_url,
             "date_unavailable": date_unavailable,
             "date_unavailable_reason": date_unavailable_reason,
+            "cached": False,
+            "elapsed_ms": elapsed_ms(),
         }
     )
 
