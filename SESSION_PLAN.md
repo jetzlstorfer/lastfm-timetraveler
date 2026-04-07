@@ -43,6 +43,9 @@ lastfm-timetraveller/
 - [x] Show album name in result card
 - [ ] Deploy to a cloud service (e.g., Fly.io, Railway)
 - [ ] Add a "share" button to share the result
-- [ ] Support multiple users (input username in UI instead of env var)
+- [x] Support multiple users (input username in UI instead of env var)
+- [x] Show user's top tracks as quick suggestions (with period selector)
+- [x] "On This Day" section — what you listened to 1, 2, 3, 5, 10 years ago
+- [x] Persist username in cookie for return visits
 - [ ] Cache autocomplete results to reduce API calls
 - [ ] Add rate limiting

@@ -16,7 +16,7 @@
       flex-direction: column;
       align-items: center;
       justify-content: flex-start;
-      padding-top: 10vh;
+      padding-top: 8vh;
       background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
       color: #e0e0e0;
     }
@@ -33,12 +33,106 @@
     .subtitle {
       font-size: 0.95rem;
       color: #999;
-      margin-bottom: 2.5rem;
+      margin-bottom: 2rem;
     }
+
+    /* Username section */
+    .username-section {
+      width: min(90vw, 480px);
+      margin-bottom: 1.5rem;
+    }
+
+    .username-bar {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    #username-input {
+      flex: 1;
+      padding: 12px 16px;
+      font-size: 0.95rem;
+      border: 2px solid rgba(255,255,255,0.12);
+      border-radius: 12px;
+      background: rgba(255,255,255,0.06);
+      color: #fff;
+      outline: none;
+      font-family: inherit;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    #username-input::placeholder { color: #777; }
+    #username-input:focus {
+      border-color: #d51007;
+      box-shadow: 0 0 0 3px rgba(213, 16, 7, 0.25);
+    }
+
+    #connect-btn {
+      padding: 12px 22px;
+      border: none;
+      border-radius: 12px;
+      background: linear-gradient(135deg, #d51007, #ff6b6b);
+      color: #fff;
+      font-weight: 600;
+      font-size: 0.9rem;
+      cursor: pointer;
+      font-family: inherit;
+      transition: transform 0.15s, opacity 0.15s;
+      white-space: nowrap;
+    }
+
+    #connect-btn:hover { transform: scale(1.03); }
+    #connect-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+    .user-profile {
+      display: none;
+      align-items: center;
+      gap: 14px;
+      padding: 14px 18px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 14px;
+      animation: slideUp 0.3s ease;
+    }
+
+    .user-profile.show { display: flex; }
+
+    .user-profile img {
+      width: 42px; height: 42px;
+      border-radius: 50%;
+      object-fit: cover;
+      background: #333;
+    }
+
+    .user-profile .user-info { flex: 1; }
+    .user-profile .user-name { font-weight: 700; color: #fff; font-size: 1rem; }
+    .user-profile .user-stats { font-size: 0.8rem; color: #888; }
+
+    .user-profile .change-btn {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 8px;
+      color: #aaa;
+      padding: 6px 14px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      font-family: inherit;
+      transition: border-color 0.2s, color 0.2s;
+    }
+
+    .user-profile .change-btn:hover { border-color: #d51007; color: #fff; }
+
+    /* Search section */
+    .search-section {
+      display: none;
+      width: min(90vw, 480px);
+    }
+
+    .search-section.show { display: block; }
 
     .search-container {
       position: relative;
-      width: min(90vw, 480px);
+      width: 100%;
     }
 
     #search {
@@ -111,10 +205,213 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    .ac-item .ac-plays {
+      font-size: 0.72rem;
+      color: #666;
+      margin-top: 1px;
+    }
+
+    /* Top tracks suggestions */
+    .top-tracks-section {
+      display: none;
+      width: min(90vw, 480px);
+      margin-top: 1.5rem;
+    }
+
+    .top-tracks-section.show { display: block; }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .section-title {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .period-select {
+      margin-left: auto;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 8px;
+      color: #aaa;
+      padding: 4px 10px;
+      font-size: 0.75rem;
+      font-family: inherit;
+      cursor: pointer;
+      outline: none;
+    }
+
+    .period-select option { background: #1e1b3a; }
+
+    .top-tracks-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .top-track-card {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 12px;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+
+    .top-track-card:hover {
+      background: rgba(213, 16, 7, 0.1);
+      border-color: rgba(213, 16, 7, 0.3);
+    }
+
+    .top-track-card img {
+      width: 36px; height: 36px;
+      border-radius: 6px;
+      object-fit: cover;
+      background: #333;
+      flex-shrink: 0;
+    }
+
+    .top-track-card .tt-text { min-width: 0; flex: 1; }
+    .top-track-card .tt-name {
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: #ddd;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .top-track-card .tt-artist {
+      font-size: 0.72rem;
+      color: #888;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .top-track-card .tt-plays {
+      font-size: 0.65rem;
+      color: #666;
+    }
+
+    /* On This Day section */
+    .on-this-day-section {
+      display: none;
+      width: min(90vw, 520px);
+      margin-top: 2rem;
+    }
+
+    .on-this-day-section.show { display: block; }
+
+    .otd-period {
+      margin-bottom: 1.5rem;
+      animation: slideUp 0.4s ease;
+    }
+
+    .otd-period-header {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .otd-years-badge {
+      display: inline-block;
+      background: linear-gradient(135deg, #d51007, #ff6b6b);
+      color: #fff;
+      font-weight: 700;
+      font-size: 0.82rem;
+      padding: 4px 12px;
+      border-radius: 20px;
+    }
+
+    .otd-date {
+      font-size: 0.8rem;
+      color: #777;
+    }
+
+    .otd-total {
+      font-size: 0.72rem;
+      color: #555;
+      margin-left: auto;
+    }
+
+    .otd-tracks {
+      display: flex;
+      gap: 10px;
+      overflow-x: auto;
+      padding-bottom: 6px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,0.1) transparent;
+    }
+
+    .otd-track {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 12px;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+      min-width: 200px;
+      max-width: 260px;
+    }
+
+    .otd-track:hover {
+      background: rgba(213, 16, 7, 0.1);
+      border-color: rgba(213, 16, 7, 0.3);
+    }
+
+    .otd-track img {
+      width: 38px; height: 38px;
+      border-radius: 6px;
+      object-fit: cover;
+      background: #333;
+      flex-shrink: 0;
+    }
+
+    .otd-track .otd-text { min-width: 0; }
+    .otd-track .otd-name {
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: #ddd;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .otd-track .otd-artist {
+      font-size: 0.72rem;
+      color: #888;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .otd-track .otd-plays {
+      font-size: 0.65rem;
+      color: #666;
+    }
+
+    .otd-empty {
+      font-size: 0.85rem;
+      color: #555;
+      font-style: italic;
+      padding: 12px 0;
+    }
 
     /* Result card */
     .result-card {
-      margin-top: 3rem;
+      margin-top: 2rem;
       width: min(90vw, 480px);
       background: rgba(255,255,255,0.05);
       border: 1px solid rgba(255,255,255,0.1);
@@ -198,7 +495,7 @@
     }
 
     .spinner {
-      margin-top: 3rem;
+      margin-top: 2rem;
       width: 40px; height: 40px;
       border: 4px solid rgba(255,255,255,0.1);
       border-top-color: #d51007;
@@ -260,10 +557,37 @@
       margin-top: 3px;
       font-style: italic;
     }
+
+    .section-divider {
+      width: min(90vw, 480px);
+      border: none;
+      border-top: 1px solid rgba(255,255,255,0.06);
+      margin: 1.5rem 0 0.5rem;
+    }
+
+    /* Mini loading dots */
+    .loading-dots {
+      display: inline-flex;
+      gap: 4px;
+      align-items: center;
+      margin-left: 8px;
+    }
+    .loading-dots span {
+      width: 6px; height: 6px;
+      background: #d51007;
+      border-radius: 50%;
+      animation: dotPulse 1.2s ease-in-out infinite;
+    }
+    .loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+    .loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes dotPulse {
+      0%, 60%, 100% { opacity: 0.2; transform: scale(0.8); }
+      30% { opacity: 1; transform: scale(1.2); }
+    }
   </style>
 </head>
 <body>
-  <h1>🕰️🧑‍🚀 Last.fm Time Traveler</h1>
+  <span style="font-size:2.2rem">🕰️🧑‍🚀</span> <h1 style="display:inline">Last.fm Time Traveler</h1>
   <p class="subtitle">Find the very first time you listened to a song</p>
 
   <div id="config-banner" class="config-banner">
@@ -271,13 +595,59 @@
     <div class="banner-msg" id="banner-msg"></div>
   </div>
 
-  <div class="search-container">
-    <input id="search" type="text" placeholder="Start typing a song title…" autocomplete="off" />
-    <div id="ac-list" class="autocomplete-list"></div>
+  <!-- Username input -->
+  <div class="username-section" id="username-section">
+    <div class="username-bar" id="username-bar">
+      <input id="username-input" type="text" placeholder="Enter your Last.fm username…" autocomplete="off" />
+      <button id="connect-btn">Connect</button>
+    </div>
+    <div class="user-profile" id="user-profile">
+      <img id="user-avatar" src="" alt="" />
+      <div class="user-info">
+        <div class="user-name" id="user-display-name"></div>
+        <div class="user-stats" id="user-stats"></div>
+      </div>
+      <button class="change-btn" id="change-user-btn">Change</button>
+    </div>
+  </div>
+
+  <!-- Search section (shown after connecting) -->
+  <div class="search-section" id="search-section">
+    <div class="search-container">
+      <input id="search" type="text" placeholder="Start typing a song title…" autocomplete="off" />
+      <div id="ac-list" class="autocomplete-list"></div>
+    </div>
   </div>
 
   <div id="spinner" class="spinner"></div>
   <div id="result" class="result-card"></div>
+
+  <!-- Top tracks suggestions -->
+  <div class="top-tracks-section" id="top-tracks-section">
+    <div class="section-header">
+      <span class="section-title">🎵 Your top tracks</span>
+      <select class="period-select" id="period-select">
+        <option value="7day">Last 7 days</option>
+        <option value="1month" selected>Last month</option>
+        <option value="3month">Last 3 months</option>
+        <option value="6month">Last 6 months</option>
+        <option value="12month">Last year</option>
+        <option value="overall">All time</option>
+      </select>
+    </div>
+    <div class="top-tracks-grid" id="top-tracks-grid"></div>
+  </div>
+
+  <!-- On This Day section -->
+  <div class="on-this-day-section" id="on-this-day-section">
+    <div class="section-header">
+      <span class="section-title">📅 On this day…</span>
+      <div class="loading-dots" id="otd-loading" style="display:none">
+        <span></span><span></span><span></span>
+      </div>
+    </div>
+    <div id="on-this-day-content"></div>
+  </div>
 
   <footer>
     Powered by <a href="https://www.last.fm/api" target="_blank">Last.fm API</a>
@@ -290,13 +660,38 @@
     const spinner = document.getElementById('spinner');
     const configBanner = document.getElementById('config-banner');
     const bannerMsg = document.getElementById('banner-msg');
+    const usernameInput = document.getElementById('username-input');
+    const connectBtn = document.getElementById('connect-btn');
+    const usernameBar = document.getElementById('username-bar');
+    const userProfile = document.getElementById('user-profile');
+    const changeUserBtn = document.getElementById('change-user-btn');
+    const searchSection = document.getElementById('search-section');
+    const topTracksSection = document.getElementById('top-tracks-section');
+    const topTracksGrid = document.getElementById('top-tracks-grid');
+    const periodSelect = document.getElementById('period-select');
+    const otdSection = document.getElementById('on-this-day-section');
+    const otdContent = document.getElementById('on-this-day-content');
+    const otdLoading = document.getElementById('otd-loading');
 
     let debounceTimer = null;
     let activeIdx = -1;
     let currentResults = [];
     let configOk = false;
+    let currentUsername = '';
 
-    // Check API config on load
+    // Cookie helpers
+    function setCookie(name, value, days = 365) {
+      const d = new Date();
+      d.setTime(d.getTime() + days * 86400000);
+      document.cookie = `${name}=${encodeURIComponent(value)};expires=${d.toUTCString()};path=/;SameSite=Lax`;
+    }
+
+    function getCookie(name) {
+      const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+      return match ? decodeURIComponent(match[2]) : '';
+    }
+
+    // Check API config on load, then restore username from cookie
     (async () => {
       try {
         const res = await fetch('/api/status');
@@ -304,16 +699,170 @@
         if (!data.ok) {
           bannerMsg.innerHTML = data.error;
           configBanner.classList.add('show');
-          searchInput.disabled = true;
-          searchInput.placeholder = 'Fix configuration first…';
+          usernameInput.disabled = true;
+          connectBtn.disabled = true;
         } else {
           configOk = true;
+          const saved = getCookie('lastfm_username');
+          if (saved) {
+            usernameInput.value = saved;
+            connectUser(saved);
+          }
         }
       } catch {
         bannerMsg.textContent = 'Could not reach the server.';
         configBanner.classList.add('show');
       }
     })();
+
+    // Connect user
+    connectBtn.addEventListener('click', () => {
+      const u = usernameInput.value.trim();
+      if (u) connectUser(u);
+    });
+
+    usernameInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const u = usernameInput.value.trim();
+        if (u) connectUser(u);
+      }
+    });
+
+    changeUserBtn.addEventListener('click', () => {
+      currentUsername = '';
+      userProfile.classList.remove('show');
+      usernameBar.style.display = 'flex';
+      searchSection.classList.remove('show');
+      topTracksSection.classList.remove('show');
+      otdSection.classList.remove('show');
+      resultCard.classList.remove('show');
+      usernameInput.value = '';
+      usernameInput.focus();
+    });
+
+    async function connectUser(username) {
+      connectBtn.disabled = true;
+      connectBtn.textContent = '…';
+      try {
+        const res = await fetch(`/api/user/validate?username=${encodeURIComponent(username)}`);
+        const data = await res.json();
+        if (!data.ok) {
+          alert(data.error);
+          connectBtn.disabled = false;
+          connectBtn.textContent = 'Connect';
+          return;
+        }
+        currentUsername = data.username;
+        setCookie('lastfm_username', currentUsername);
+
+        // Show profile bar
+        document.getElementById('user-avatar').src = data.image || defaultAvatar();
+        document.getElementById('user-display-name').textContent = data.username;
+        const regStr = typeof data.registered === 'string' ? data.registered : '';
+        document.getElementById('user-stats').textContent =
+          `${data.playcount.toLocaleString()} scrobbles` +
+          (regStr ? ` · since ${regStr}` : '');
+
+        usernameBar.style.display = 'none';
+        userProfile.classList.add('show');
+        searchSection.classList.add('show');
+        searchInput.focus();
+
+        // Load top tracks and On This Day in parallel
+        loadTopTracks();
+        loadOnThisDay();
+      } catch (err) {
+        alert('Could not connect. Please try again.');
+      }
+      connectBtn.disabled = false;
+      connectBtn.textContent = 'Connect';
+    }
+
+    // Top tracks
+    periodSelect.addEventListener('change', () => loadTopTracks());
+
+    async function loadTopTracks() {
+      if (!currentUsername) return;
+      topTracksGrid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#666;padding:16px;">Loading…</div>';
+      topTracksSection.classList.add('show');
+      try {
+        const res = await fetch(
+          `/api/user/top-tracks?username=${encodeURIComponent(currentUsername)}&period=${periodSelect.value}`
+        );
+        const tracks = await res.json();
+        if (!tracks.length) {
+          topTracksGrid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#666;padding:16px;">No top tracks for this period.</div>';
+          return;
+        }
+        topTracksGrid.innerHTML = tracks.map((t, i) => `
+          <div class="top-track-card" data-idx="${i}">
+            <img src="${t.image || defaultThumb()}" alt="" />
+            <div class="tt-text">
+              <div class="tt-name">${escHtml(t.name)}</div>
+              <div class="tt-artist">${escHtml(t.artist)}</div>
+              <div class="tt-plays">${t.playcount} plays</div>
+            </div>
+          </div>
+        `).join('');
+        topTracksGrid.querySelectorAll('.top-track-card').forEach(el => {
+          el.addEventListener('click', () => {
+            const t = tracks[+el.dataset.idx];
+            selectResult({ name: t.name, artist: t.artist, image: t.image });
+          });
+        });
+      } catch {
+        topTracksGrid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#666;padding:16px;">Could not load top tracks.</div>';
+      }
+    }
+
+    // On This Day
+    async function loadOnThisDay() {
+      if (!currentUsername) return;
+      otdLoading.style.display = 'inline-flex';
+      otdContent.innerHTML = '';
+      otdSection.classList.add('show');
+      try {
+        const res = await fetch(`/api/on-this-day?username=${encodeURIComponent(currentUsername)}`);
+        const periods = await res.json();
+        otdLoading.style.display = 'none';
+
+        if (!periods.length) {
+          otdContent.innerHTML = '<div class="otd-empty">No scrobbles found on this day in past years.</div>';
+          return;
+        }
+
+        otdContent.innerHTML = periods.map(p => `
+          <div class="otd-period">
+            <div class="otd-period-header">
+              <span class="otd-years-badge">${p.years_ago} year${p.years_ago > 1 ? 's' : ''} ago</span>
+              <span class="otd-date">${p.date}</span>
+              <span class="otd-total">${p.total_scrobbles} scrobbles that day</span>
+            </div>
+            <div class="otd-tracks">
+              ${p.tracks.map(t => `
+                <div class="otd-track" data-name="${escAttr(t.name)}" data-artist="${escAttr(t.artist)}">
+                  <img src="${t.image || defaultThumb()}" alt="" />
+                  <div class="otd-text">
+                    <div class="otd-name">${escHtml(t.name)}</div>
+                    <div class="otd-artist">${escHtml(t.artist)}</div>
+                    <div class="otd-plays">${t.plays}× that day</div>
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        `).join('');
+
+        otdContent.querySelectorAll('.otd-track').forEach(el => {
+          el.addEventListener('click', () => {
+            selectResult({ name: el.dataset.name, artist: el.dataset.artist, image: '' });
+          });
+        });
+      } catch {
+        otdLoading.style.display = 'none';
+        otdContent.innerHTML = '<div class="otd-empty">Could not load On This Day data.</div>';
+      }
+    }
 
     // Debounced autocomplete search
     searchInput.addEventListener('input', () => {
@@ -359,7 +908,7 @@
       activeIdx = -1;
       acList.innerHTML = items.map((t, i) => `
         <div class="ac-item" data-idx="${i}">
-          <img src="${t.image || 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2240%22 height=%2240%22><rect fill=%22%23333%22 width=%2240%22 height=%2240%22/><text x=%2220%22 y=%2224%22 text-anchor=%22middle%22 fill=%22%23666%22 font-size=%2218%22>♪</text></svg>'}" alt="" />
+          <img src="${t.image || defaultThumb()}" alt="" />
           <div class="ac-text">
             <span class="ac-track">${escHtml(t.name)}</span>
             <span class="ac-artist">${escHtml(t.artist)}</span>
@@ -390,7 +939,7 @@
 
       try {
         const res = await fetch(
-          `/api/first-listen?track=${encodeURIComponent(track.name)}&artist=${encodeURIComponent(track.artist)}`
+          `/api/first-listen?track=${encodeURIComponent(track.name)}&artist=${encodeURIComponent(track.artist)}&username=${encodeURIComponent(currentUsername)}`
         );
         const data = await res.json();
         spinner.classList.remove('show');
@@ -415,7 +964,7 @@
           : '';
         const timeAgo = dateObj ? relativeTime(dateObj) : '';
 
-        const imgSrc = data.image || 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22100%22 height=%22100%22><rect fill=%22%23222%22 width=%22100%22 height=%22100%22/><text x=%2250%22 y=%2258%22 text-anchor=%22middle%22 fill=%22%23555%22 font-size=%2240%22>♪</text></svg>';
+        const imgSrc = data.image || defaultAlbumArt();
 
         resultCard.innerHTML = `
           <div class="result-header">
@@ -479,6 +1028,22 @@
       const d = document.createElement('div');
       d.textContent = s;
       return d.innerHTML;
+    }
+
+    function escAttr(s) {
+      return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    function defaultThumb() {
+      return "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2240%22 height=%2240%22><rect fill=%22%23333%22 width=%2240%22 height=%2240%22/><text x=%2220%22 y=%2224%22 text-anchor=%22middle%22 fill=%22%23666%22 font-size=%2218%22>♪</text></svg>";
+    }
+
+    function defaultAlbumArt() {
+      return "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22100%22 height=%22100%22><rect fill=%22%23222%22 width=%22100%22 height=%22100%22/><text x=%2250%22 y=%2258%22 text-anchor=%22middle%22 fill=%22%23555%22 font-size=%2240%22>♪</text></svg>";
+    }
+
+    function defaultAvatar() {
+      return "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2242%22 height=%2242%22><rect fill=%22%23333%22 width=%2242%22 height=%2242%22 rx=%2221%22/><text x=%2221%22 y=%2226%22 text-anchor=%22middle%22 fill=%22%23777%22 font-size=%2220%22>👤</text></svg>";
     }
   </script>
 </body>

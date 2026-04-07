@@ -1,12 +1,24 @@
 """Tests for the Last.fm Time Traveler app."""
 
 import json
+import os
+import tempfile
 from unittest.mock import patch
 
 import pytest
 
+import database
 import app as app_module
 from app import app
+
+
+@pytest.fixture(autouse=True)
+def isolated_db(tmp_path):
+    """Point the database module at a fresh temp file for every test."""
+    db_file = str(tmp_path / "test.db")
+    with patch.object(database, "DB_PATH", db_file):
+        database.init_db()
+        yield db_file
 
 
 @pytest.fixture
@@ -129,13 +141,10 @@ def _search_response(tracks):
 
 class TestStatus:
     @patch.object(app_module, "LASTFM_API_KEY", "valid_key")
-    @patch.object(app_module, "LASTFM_USERNAME", "testuser")
-    @patch.object(app_module, "lastfm_get", return_value=_user_info_response("testuser"))
-    def test_status_ok(self, mock_get, client):
+    def test_status_ok(self, client):
         resp = client.get("/api/status")
         data = resp.get_json()
         assert data["ok"] is True
-        assert data["username"] == "testuser"
 
     @patch.object(app_module, "LASTFM_API_KEY", "")
     def test_status_missing_api_key(self, client):
@@ -143,14 +152,6 @@ class TestStatus:
         data = resp.get_json()
         assert data["ok"] is False
         assert "LASTFM_API_KEY" in data["error"]
-
-    @patch.object(app_module, "LASTFM_API_KEY", "valid_key")
-    @patch.object(app_module, "LASTFM_USERNAME", "")
-    def test_status_missing_username(self, client):
-        resp = client.get("/api/status")
-        data = resp.get_json()
-        assert data["ok"] is False
-        assert "LASTFM_USERNAME" in data["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -190,16 +191,19 @@ class TestFirstListen:
         resp = client.get("/api/first-listen")
         assert resp.status_code == 400
 
-        resp = client.get("/api/first-listen?track=Hello")
+        resp = client.get("/api/first-listen?track=Hello&username=testuser")
         assert resp.status_code == 400
 
-        resp = client.get("/api/first-listen?artist=Adele")
+        resp = client.get("/api/first-listen?artist=Adele&username=testuser")
+        assert resp.status_code == 400
+
+        resp = client.get("/api/first-listen?track=Hello&artist=Adele")
         assert resp.status_code == 400
 
     @patch.object(app_module, "lastfm_get")
     def test_never_listened_track(self, mock_get, client):
         mock_get.return_value = _track_info_response(userplaycount=0)
-        resp = client.get("/api/first-listen?track=Unknown&artist=Nobody")
+        resp = client.get("/api/first-listen?track=Unknown&artist=Nobody&username=testuser")
         data = resp.get_json()
         assert data["found"] is False
         assert "never" in data["message"].lower()
@@ -232,7 +236,7 @@ class TestFirstListen:
             return {}
 
         mock_get.side_effect = fake_lastfm_get
-        resp = client.get("/api/first-listen?track=TestTrack&artist=TestArtist")
+        resp = client.get("/api/first-listen?track=TestTrack&artist=TestArtist&username=testuser")
         data = resp.get_json()
 
         assert data["found"] is True
@@ -263,7 +267,7 @@ class TestFirstListen:
             return {}
 
         mock_get.side_effect = fake_lastfm_get
-        resp = client.get("/api/first-listen?track=Song&artist=Band")
+        resp = client.get("/api/first-listen?track=Song&artist=Band&username=testuser")
         data = resp.get_json()
 
         assert data["found"] is True
@@ -292,7 +296,7 @@ class TestFirstListen:
             return {}
 
         mock_get.side_effect = fake_lastfm_get
-        resp = client.get("/api/first-listen?track=X&artist=Y")
+        resp = client.get("/api/first-listen?track=X&artist=Y&username=testuser")
         data = resp.get_json()
 
         assert data["found"] is True
@@ -303,7 +307,7 @@ class TestFirstListen:
     def test_track_getinfo_http_error_returns_502(self, mock_get, client):
         import requests as req
         mock_get.side_effect = req.HTTPError("503 Server Error")
-        resp = client.get("/api/first-listen?track=A&artist=B")
+        resp = client.get("/api/first-listen?track=A&artist=B&username=testuser")
         assert resp.status_code == 502
 
     @patch.object(app_module, "lastfm_get")
@@ -326,7 +330,7 @@ class TestFirstListen:
             return {}
 
         mock_get.side_effect = fake_lastfm_get
-        resp = client.get("/api/first-listen?track=Only&artist=One")
+        resp = client.get("/api/first-listen?track=Only&artist=One&username=testuser")
         data = resp.get_json()
 
         assert data["found"] is True
@@ -354,6 +358,135 @@ class TestFirstListen:
             return {}
 
         mock_get.side_effect = fake_lastfm_get
-        resp = client.get("/api/first-listen?track=My+Song&artist=The+Band")
+        resp = client.get("/api/first-listen?track=My+Song&artist=The+Band&username=testuser")
         data = resp.get_json()
         assert data["found"] is True
+
+
+# ---------------------------------------------------------------------------
+# Database caching
+# ---------------------------------------------------------------------------
+
+class TestDatabaseCaching:
+    @patch.object(app_module, "LASTFM_USERNAME", "testuser")
+    @patch.object(app_module, "lastfm_get")
+    def test_result_is_cached_after_first_query(self, mock_get, client):
+        """After a successful lookup the result must be stored in the DB."""
+        weeks = [(1000000, 1604800)]
+
+        def fake_lastfm_get(method, **kwargs):
+            if method == "track.getInfo":
+                return _track_info_response(userplaycount=5, track="Cached Song", artist="Artist")
+            if method == "user.getWeeklyChartList":
+                return _weekly_chart_list(weeks)
+            if method == "user.getWeeklyTrackChart":
+                return _weekly_track_chart([("Cached Song", "Artist", 5)])
+            if method == "user.getRecentTracks":
+                return _recent_tracks_response(
+                    [("Cached Song", "Artist", "10 Jan 2007, 09:00", "1168419600")],
+                    page=1, total_pages=1,
+                )
+            return {}
+
+        mock_get.side_effect = fake_lastfm_get
+        resp = client.get("/api/first-listen?track=Cached+Song&artist=Artist")
+        data = resp.get_json()
+        assert data["found"] is True
+        assert data.get("cached") is None  # first hit is not from cache
+
+        # Verify it was stored
+        stored = database.get_cached("testuser", "Cached Song", "Artist")
+        assert stored is not None
+        assert stored["track"] == "Cached Song"
+        assert stored["first_listen_date"] == "10 Jan 2007, 09:00"
+
+    @patch.object(app_module, "LASTFM_USERNAME", "testuser")
+    @patch.object(app_module, "lastfm_get")
+    def test_cached_result_served_without_api_call(self, mock_get, client):
+        """Second query for the same track must come from cache (no API call)."""
+        # Pre-populate cache
+        database.save_result(
+            "testuser", "Lazy Song", "Bruno Mars",
+            "Doo-Wops & Hooligans",
+            "01 May 2011, 14:00", "1304258400",
+            88, "https://img.example/lazy.jpg",
+        )
+
+        resp = client.get("/api/first-listen?track=Lazy+Song&artist=Bruno+Mars")
+        data = resp.get_json()
+
+        assert data["found"] is True
+        assert data["cached"] is True
+        assert data["track"] == "Lazy Song"
+        assert data["date"] == "01 May 2011, 14:00"
+        assert data["total_scrobbles"] == 88
+        # The Last.fm API must not have been called at all
+        mock_get.assert_not_called()
+
+    @patch.object(app_module, "LASTFM_USERNAME", "testuser")
+    @patch.object(app_module, "lastfm_get")
+    def test_cache_lookup_is_case_insensitive(self, mock_get, client):
+        """Cache hit should work regardless of the casing used in the query."""
+        database.save_result(
+            "testuser", "Bohemian Rhapsody", "Queen",
+            "A Night at the Opera",
+            "15 Mar 2005, 20:00", "1110924000",
+            1000, "",
+        )
+
+        resp = client.get("/api/first-listen?track=bohemian+rhapsody&artist=queen")
+        data = resp.get_json()
+
+        assert data["found"] is True
+        assert data["cached"] is True
+        mock_get.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# /api/history
+# ---------------------------------------------------------------------------
+
+class TestHistory:
+    @patch.object(app_module, "LASTFM_USERNAME", "testuser")
+    def test_empty_history(self, client):
+        resp = client.get("/api/history")
+        assert resp.status_code == 200
+        assert resp.get_json() == []
+
+    @patch.object(app_module, "LASTFM_USERNAME", "testuser")
+    def test_history_returns_saved_results(self, client):
+        database.save_result(
+            "testuser", "Track One", "Artist A", "Album A",
+            "01 Jan 2010, 12:00", "1262347200", 10, "",
+        )
+        database.save_result(
+            "testuser", "Track Two", "Artist B", "Album B",
+            "15 Jun 2015, 18:30", "1434389400", 25, "",
+        )
+
+        resp = client.get("/api/history")
+        data = resp.get_json()
+
+        assert len(data) == 2
+        tracks = {r["track"] for r in data}
+        assert tracks == {"Track One", "Track Two"}
+
+    @patch.object(app_module, "LASTFM_USERNAME", "testuser")
+    def test_history_filters_by_username(self, client):
+        database.save_result(
+            "testuser", "My Track", "My Artist", "", "01 Jan 2010, 00:00", "1262304000", 5, "",
+        )
+        database.save_result(
+            "otheruser", "Other Track", "Other Artist", "", "01 Jan 2012, 00:00", "1325376000", 3, "",
+        )
+
+        resp = client.get("/api/history?username=testuser")
+        data = resp.get_json()
+        assert len(data) == 1
+        assert data[0]["track"] == "My Track"
+
+        resp2 = client.get("/api/history?username=otheruser")
+        data2 = resp2.get_json()
+        assert len(data2) == 1
+        assert data2[0]["track"] == "Other Track"
+

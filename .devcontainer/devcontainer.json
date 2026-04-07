@@ -23,7 +23,7 @@ ng wit{
   "portsAttributes": {
     "5000": {
       "label": "Last.fm Time Traveler",
-      "onAutoForward": "openBrowser"
+      "onAutoForward": "openPreview"
     }
   }
 }
