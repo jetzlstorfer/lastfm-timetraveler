@@ -312,7 +312,7 @@ def user_top_tracks():
     if not username:
         return jsonify({"error": "username is required"}), 400
     try:
-        data = lastfm_get("user.getTopTracks", user=username, period=period, limit=8)
+        data = lastfm_get("user.getTopTracks", user=username, period=period, limit=6)
         tracks = data.get("toptracks", {}).get("track", [])
         results = []
         for t in tracks:
@@ -394,9 +394,9 @@ def on_this_day():
                 else:
                     track_list[seen[key]]["plays"] += 1
 
-            # Sort by plays descending, take top 5
+            # Sort by plays descending, take top 6
             track_list.sort(key=lambda x: x["plays"], reverse=True)
-            top = track_list[:5]
+            top = track_list[:6]
 
             if top:
                 periods.append({

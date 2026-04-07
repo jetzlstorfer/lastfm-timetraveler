@@ -5,783 +5,900 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Last.fm Time Traveler</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet" />
+  <script>
+    tailwind = window.tailwind || {};
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ember: {
+              50: '#fff0f0',
+              100: '#ffdede',
+              200: '#ffb3b3',
+              300: '#ff7b7b',
+              400: '#ff5252',
+              500: '#d51007',
+              600: '#b50d06',
+              700: '#8b0a04',
+              800: '#6d0903',
+              900: '#4d0602'
+            },
+            ink: {
+              950: '#0f0c29'
+            }
+          },
+          fontFamily: {
+            display: ['Space Grotesk', 'sans-serif'],
+            body: ['IBM Plex Sans', 'sans-serif']
+          },
+          boxShadow: {
+            glow: '0 0 0 1px rgba(255,255,255,0.06), 0 24px 80px rgba(0,0,0,0.35)'
+          }
+        }
+      }
+    };
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
 
     body {
-      font-family: 'Inter', system-ui, sans-serif;
-      min-height: 100vh;
+      font-family: 'IBM Plex Sans', sans-serif;
+    }
+
+    h1, h2, h3, .display-font {
+      font-family: 'Space Grotesk', sans-serif;
+    }
+
+    #config-banner,
+    #user-profile,
+    #search-section,
+    #top-tracks-section,
+    #on-this-day-section,
+    #loading-screen,
+    #result {
+      display: none;
+    }
+
+    #config-banner.show,
+    #search-section.show,
+    #top-tracks-section.show,
+    #on-this-day-section.show,
+    #result.show {
+      display: block;
+    }
+
+    #user-profile.show,
+    #loading-screen.show {
       display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: flex-start;
-      padding-top: 8vh;
-      background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
-      color: #e0e0e0;
     }
 
-    h1 {
-      font-size: 2.2rem;
-      font-weight: 700;
-      background: linear-gradient(90deg, #d51007, #ff6b6b);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      margin-bottom: 0.3rem;
+    .glass-panel {
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
+        rgba(30, 27, 58, 0.78);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+      backdrop-filter: blur(22px);
     }
 
-    .subtitle {
-      font-size: 0.95rem;
-      color: #999;
-      margin-bottom: 2rem;
+    .show-animate {
+      animation: slideUp 0.35s ease;
     }
 
-    /* Username section */
-    .username-section {
-      width: min(90vw, 480px);
-    .stat-note {
-      margin-top: 0.35rem;
-      max-width: 30rem;
-      color: #a7a7a7;
-      font-size: 0.84rem;
-      line-height: 1.4;
-    }
-      margin-bottom: 1.5rem;
+    @keyframes slideUp {
+      from {
+        opacity: 0;
+        transform: translateY(18px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
     }
 
-    .username-bar {
-      display: flex;
-      gap: 10px;
-      align-items: center;
-    }
-
-    #username-input {
-      flex: 1;
-      padding: 12px 16px;
-      font-size: 0.95rem;
-      border: 2px solid rgba(255,255,255,0.12);
-      border-radius: 12px;
-      background: rgba(255,255,255,0.06);
-      color: #fff;
+    .field-input {
+      width: 100%;
+      border-radius: 1rem;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.05);
+      color: #f5f5f4;
       outline: none;
-      font-family: inherit;
-      transition: border-color 0.2s, box-shadow 0.2s;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
     }
 
-    #username-input::placeholder { color: #777; }
-    #username-input:focus {
-      border-color: #d51007;
-      box-shadow: 0 0 0 3px rgba(213, 16, 7, 0.25);
+    .field-input::placeholder {
+      color: #78716c;
     }
 
-    #connect-btn {
-      padding: 12px 22px;
+    .field-input:focus {
+      border-color: rgba(213, 16, 7, 0.7);
+      box-shadow: 0 0 0 4px rgba(213, 16, 7, 0.2);
+      background: rgba(255, 255, 255, 0.07);
+    }
+
+    .primary-button {
       border: none;
-      border-radius: 12px;
+      border-radius: 1rem;
       background: linear-gradient(135deg, #d51007, #ff6b6b);
       color: #fff;
-      font-weight: 600;
-      font-size: 0.9rem;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      transition: transform 0.15s ease, opacity 0.15s ease, box-shadow 0.15s ease;
+      box-shadow: 0 10px 30px rgba(213, 16, 7, 0.3);
       cursor: pointer;
-      font-family: inherit;
-      transition: transform 0.15s, opacity 0.15s;
-      white-space: nowrap;
     }
 
-    #connect-btn:hover { transform: scale(1.03); }
-    #connect-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
-
-    .user-profile {
-      display: none;
-      align-items: center;
-      gap: 14px;
-      padding: 14px 18px;
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 14px;
-      animation: slideUp 0.3s ease;
+    .primary-button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 14px 36px rgba(213, 16, 7, 0.4);
     }
 
-    .user-profile.show { display: flex; }
-
-    .user-profile img {
-      width: 42px; height: 42px;
-      border-radius: 50%;
-      object-fit: cover;
-      background: #333;
+    .primary-button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
     }
 
-    .user-profile .user-info { flex: 1; }
-    .user-profile .user-name { font-weight: 700; color: #fff; font-size: 1rem; }
-    .user-profile .user-stats { font-size: 0.8rem; color: #888; }
-
-    .user-profile .change-btn {
-      background: none;
-      border: 1px solid rgba(255,255,255,0.15);
-      border-radius: 8px;
-      color: #aaa;
-      padding: 6px 14px;
-      font-size: 0.8rem;
-      cursor: pointer;
-      font-family: inherit;
-      transition: border-color 0.2s, color 0.2s;
+    .ghost-button {
+      border-radius: 0.875rem;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      background: rgba(255, 255, 255, 0.03);
+      color: #d6d3d1;
+      transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
     }
 
-    .user-profile .change-btn:hover { border-color: #d51007; color: #fff; }
-
-    /* Search section */
-    .search-section {
-      display: none;
-      width: min(90vw, 480px);
-    }
-
-    .search-section.show { display: block; }
-
-    .search-container {
-      position: relative;
-      width: 100%;
-    }
-
-    #search {
-      width: 100%;
-      padding: 16px 20px;
-      font-size: 1.05rem;
-      border: 2px solid rgba(255,255,255,0.12);
-      border-radius: 14px;
-      background: rgba(255,255,255,0.06);
+    .ghost-button:hover {
+      border-color: rgba(213, 16, 7, 0.45);
       color: #fff;
-      outline: none;
-      transition: border-color 0.2s, box-shadow 0.2s;
-      font-family: inherit;
-    }
-
-    #search::placeholder { color: #777; }
-    #search:focus {
-      border-color: #d51007;
-      box-shadow: 0 0 0 3px rgba(213, 16, 7, 0.25);
+      background: rgba(213, 16, 7, 0.08);
     }
 
     .autocomplete-list {
       position: absolute;
-      top: calc(100% + 6px);
-      left: 0; right: 0;
-      background: #1e1b3a;
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 12px;
-      overflow: hidden;
-      z-index: 10;
-      box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+      top: calc(100% + 0.75rem);
+      left: 0;
+      right: 0;
       display: none;
+      overflow: hidden;
+      border-radius: 1.25rem;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(22, 18, 48, 0.98);
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+      backdrop-filter: blur(18px);
+      z-index: 100;
     }
 
-    .autocomplete-list.show { display: block; }
+    .autocomplete-list.show {
+      display: block;
+    }
 
     .ac-item {
       display: flex;
       align-items: center;
-      gap: 14px;
-      padding: 12px 16px;
+      gap: 0.875rem;
+      padding: 0.9rem 1rem;
       cursor: pointer;
-      transition: background 0.15s;
+      transition: background 0.15s ease;
     }
 
-    .ac-item:hover, .ac-item.active {
+    .ac-item + .ac-item {
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .ac-item:hover,
+    .ac-item.active {
       background: rgba(213, 16, 7, 0.15);
     }
 
-    .ac-item img {
-      width: 40px; height: 40px;
-      border-radius: 6px;
+    .ac-item img,
+    .top-track-card img,
+    .otd-track img {
       object-fit: cover;
-      background: #333;
+      background: rgba(255, 255, 255, 0.08);
       flex-shrink: 0;
     }
 
-    .ac-item .ac-text { display: flex; flex-direction: column; min-width: 0; }
-    .ac-item .ac-track {
-      font-weight: 600;
-      font-size: 0.95rem;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .ac-item .ac-artist {
-      font-size: 0.82rem;
-      color: #999;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .ac-item .ac-plays {
-      font-size: 0.72rem;
-      color: #666;
-      margin-top: 1px;
+    .ac-item img {
+      width: 3rem;
+      height: 3rem;
+      border-radius: 0.9rem;
     }
 
-    /* Top tracks suggestions */
-    .top-tracks-section {
-      display: none;
-      width: min(90vw, 480px);
-      margin-top: 1.5rem;
-    }
-
-    .top-tracks-section.show { display: block; }
-
-    .section-header {
+    .ac-text,
+    .tt-text,
+    .otd-text {
+      min-width: 0;
       display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 12px;
+      flex-direction: column;
     }
 
-    .section-title {
-      font-size: 0.85rem;
+    .ac-track,
+    .tt-name,
+    .otd-name {
+      color: #fafaf9;
       font-weight: 600;
-      color: #888;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
-    .period-select {
-      margin-left: auto;
-      background: rgba(255,255,255,0.06);
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 8px;
-      color: #aaa;
-      padding: 4px 10px;
-      font-size: 0.75rem;
-      font-family: inherit;
-      cursor: pointer;
-      outline: none;
+    .ac-artist,
+    .tt-artist,
+    .otd-artist {
+      font-size: 0.85rem;
+      color: #a8a29e;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-
-    .period-select option { background: #1e1b3a; }
 
     .top-tracks-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 0.85rem;
+    }
+
+    .otd-tracks {
+      display: flex;
+      gap: 0.75rem;
+      overflow-x: auto;
+      padding-bottom: 0.65rem;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,0.25) rgba(255,255,255,0.06);
+    }
+
+    .otd-tracks::-webkit-scrollbar {
+      height: 6px;
+    }
+
+    .otd-tracks::-webkit-scrollbar-track {
+      background: rgba(255,255,255,0.06);
+      border-radius: 999px;
+    }
+
+    .otd-tracks::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.25);
+      border-radius: 999px;
+    }
+
+    .otd-tracks::-webkit-scrollbar-thumb:hover {
+      background: rgba(255,255,255,0.4);
     }
 
     .top-track-card {
       display: flex;
       align-items: center;
-      gap: 10px;
-      padding: 10px 12px;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(255,255,255,0.07);
-      border-radius: 12px;
-      cursor: pointer;
-      transition: background 0.15s, border-color 0.15s;
+      gap: 0.875rem;
       min-width: 0;
+      border-radius: 1.1rem;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.035);
+      padding: 0.9rem 1rem;
+      cursor: pointer;
+      transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
     }
 
-    .top-track-card:hover {
-      background: rgba(213, 16, 7, 0.1);
-      border-color: rgba(213, 16, 7, 0.3);
-    }
-
-    .top-track-card img {
-      width: 36px; height: 36px;
-      border-radius: 6px;
-      object-fit: cover;
-      background: #333;
+    .otd-track {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
       flex-shrink: 0;
+      min-width: 200px;
+      max-width: 260px;
+      border-radius: 1.1rem;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.035);
+      padding: 0.9rem 1rem;
+      cursor: pointer;
+      transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
     }
 
-    .top-track-card .tt-text { min-width: 0; flex: 1; }
-    .top-track-card .tt-name {
-      font-size: 0.82rem;
-      font-weight: 600;
-      color: #ddd;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .top-track-card .tt-artist {
-      font-size: 0.72rem;
-      color: #888;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .top-track-card .tt-plays {
-      font-size: 0.65rem;
-      color: #666;
+    .top-track-card:hover,
+    .otd-track:hover {
+      transform: translateY(-1px);
+      border-color: rgba(213, 16, 7, 0.35);
+      background: rgba(213, 16, 7, 0.08);
     }
 
-    /* On This Day section */
-    .on-this-day-section {
-      display: none;
-      width: min(90vw, 520px);
-      margin-top: 2rem;
+    .top-track-card img,
+    .otd-track img {
+      width: 3rem;
+      height: 3rem;
+      border-radius: 0.9rem;
     }
 
-    .on-this-day-section.show { display: block; }
+    .tt-plays,
+    .otd-plays,
+    .otd-total,
+    .otd-date,
+    .otd-empty,
+    .loading-status,
+    .stat-label,
+    .stat-note,
+    .user-stats,
+    .section-eyebrow,
+    .banner-msg {
+      color: #a8a29e;
+    }
 
-    .otd-period {
-      margin-bottom: 1.5rem;
-      animation: slideUp 0.4s ease;
+    .tt-plays,
+    .otd-plays,
+    .otd-total {
+      font-size: 0.78rem;
+    }
+
+    .otd-period + .otd-period {
+      margin-top: 1.4rem;
+      padding-top: 1.4rem;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
     }
 
     .otd-period-header {
       display: flex;
-      align-items: baseline;
-      gap: 10px;
-      margin-bottom: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.65rem;
+      margin-bottom: 0.9rem;
     }
 
     .otd-years-badge {
-      display: inline-block;
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
       background: linear-gradient(135deg, #d51007, #ff6b6b);
       color: #fff;
+      font-size: 0.78rem;
       font-weight: 700;
+      padding: 0.35rem 0.8rem;
+      letter-spacing: 0.02em;
+    }
+
+    .section-title {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: #fafaf9;
+    }
+
+    .period-select {
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.04);
+      color: #e7e5e4;
+      padding: 0.55rem 0.9rem;
       font-size: 0.82rem;
-      padding: 4px 12px;
-      border-radius: 20px;
+      outline: none;
     }
 
-    .otd-date {
-      font-size: 0.8rem;
-      color: #777;
+    .period-select option {
+      background: #1e1b3a;
     }
 
-    .otd-total {
-      font-size: 0.72rem;
-      color: #555;
-      margin-left: auto;
-    }
-
-    .otd-tracks {
-      display: flex;
-      gap: 10px;
-      overflow-x: auto;
-      padding-bottom: 6px;
-      scrollbar-width: thin;
-      scrollbar-color: rgba(255,255,255,0.1) transparent;
-    }
-
-    .otd-track {
-      flex-shrink: 0;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 10px 14px;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(255,255,255,0.07);
-      border-radius: 12px;
-      cursor: pointer;
-      transition: background 0.15s, border-color 0.15s;
-      min-width: 200px;
-      max-width: 260px;
-    }
-
-    .otd-track:hover {
-      background: rgba(213, 16, 7, 0.1);
-      border-color: rgba(213, 16, 7, 0.3);
-    }
-
-    .otd-track img {
-      width: 38px; height: 38px;
-      border-radius: 6px;
-      object-fit: cover;
-      background: #333;
-      flex-shrink: 0;
-    }
-
-    .otd-track .otd-text { min-width: 0; }
-    .otd-track .otd-name {
-      font-size: 0.82rem;
-      font-weight: 600;
-      color: #ddd;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .otd-track .otd-artist {
-      font-size: 0.72rem;
-      color: #888;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .otd-track .otd-plays {
-      font-size: 0.65rem;
-      color: #666;
-    }
-
-    .otd-empty {
-      font-size: 0.85rem;
-      color: #555;
-      font-style: italic;
-      padding: 12px 0;
-    }
-
-    /* Result card */
     .result-card {
-      margin-top: 2rem;
-      width: min(90vw, 480px);
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 18px;
+      width: 100%;
       overflow: hidden;
-      display: none;
-      animation: slideUp 0.4s ease;
+      border-radius: 1.75rem;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background:
+        radial-gradient(circle at top left, rgba(213, 16, 7, 0.14), transparent 30%),
+        rgba(30, 27, 58, 0.85);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+      animation: slideUp 0.35s ease;
     }
-
-    @keyframes slideUp {
-      from { opacity: 0; transform: translateY(20px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
-
-    .result-card.show { display: block; }
 
     .result-header {
-      display: flex;
+      display: grid;
+      grid-template-columns: 112px minmax(0, 1fr);
+      gap: 1.25rem;
       align-items: center;
-      gap: 20px;
-      padding: 24px;
+      padding: 1.5rem;
     }
 
     .result-header img {
-      width: 100px; height: 100px;
-      border-radius: 12px;
+      width: 112px;
+      height: 112px;
+      border-radius: 1.25rem;
       object-fit: cover;
-      background: #333;
-      flex-shrink: 0;
+      background: rgba(255, 255, 255, 0.08);
     }
 
     .result-meta h2 {
-      font-size: 1.3rem;
+      font-size: clamp(1.4rem, 1.8vw, 2rem);
       font-weight: 700;
+      line-height: 1.05;
       color: #fff;
-      line-height: 1.3;
     }
 
-    .result-meta .artist-name {
-      font-size: 0.95rem;
-      color: #aaa;
-      margin-top: 2px;
+    .artist-name {
+      color: #d6d3d1;
+      margin-top: 0.35rem;
+      font-size: 1rem;
+    }
+
+    .album-name {
+      color: #a8a29e;
+      margin-top: 0.2rem;
+      font-size: 0.92rem;
+      font-style: italic;
     }
 
     .result-body {
-      padding: 0 24px 24px;
+      padding: 0 1.5rem 1.5rem;
     }
 
     .stat-row {
       display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 12px 0;
-      border-top: 1px solid rgba(255,255,255,0.06);
+      gap: 1rem;
+      padding: 1rem 0;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
     }
 
     .stat-icon {
+      width: 2.5rem;
+      flex-shrink: 0;
       font-size: 1.4rem;
-      width: 32px;
+      line-height: 1.8rem;
       text-align: center;
     }
 
     .stat-label {
-      font-size: 0.82rem;
-      color: #888;
+      font-size: 0.78rem;
       text-transform: uppercase;
-      letter-spacing: 0.05em;
+      letter-spacing: 0.12em;
     }
 
     .stat-value {
-      font-size: 1.05rem;
-      font-weight: 600;
       color: #fff;
+      font-size: clamp(1rem, 1.4vw, 1.2rem);
+      font-weight: 600;
+      margin-top: 0.2rem;
+    }
+
+    .stat-note {
+      margin-top: 0.45rem;
+      max-width: 48rem;
+      font-size: 0.87rem;
+      line-height: 1.55;
     }
 
     .not-found {
-      padding: 24px;
-      text-align: center;
-      color: #aaa;
+      padding: 1.5rem;
+      color: #d6d3d1;
       font-size: 1rem;
     }
 
-    /* === Time-travel loading screen === */
     .loading-screen {
-      margin-top: 2rem;
-      width: min(90vw, 480px);
-      display: none;
+      width: 100%;
       flex-direction: column;
-      align-items: center;
-      gap: 0;
-      animation: slideUp 0.4s ease;
+      animation: slideUp 0.35s ease;
     }
-    .loading-screen.show { display: flex; }
 
-    /* Starfield viewport */
     .starfield {
       position: relative;
       width: 100%;
-      height: 180px;
-      background: radial-gradient(ellipse at center, #1a1740 0%, #0f0c29 70%);
-      border-radius: 16px 16px 0 0;
+      height: 220px;
       overflow: hidden;
-      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 1.75rem 1.75rem 0 0;
+      border: 1px solid rgba(255, 255, 255, 0.08);
       border-bottom: none;
+      background:
+        radial-gradient(circle at 18% 20%, rgba(213, 16, 7, 0.2), transparent 25%),
+        radial-gradient(circle at 78% 22%, rgba(118, 75, 226, 0.22), transparent 30%),
+        linear-gradient(145deg, #1a1740 0%, #0f0c29 45%, #0a0820 100%);
     }
 
-    /* Stars */
     .star {
       position: absolute;
       background: #fff;
-      border-radius: 50%;
+      border-radius: 999px;
       animation: starStreak var(--dur) linear infinite;
       opacity: 0;
     }
+
     @keyframes starStreak {
-      0%   { transform: translateX(0); opacity: 0; }
-      10%  { opacity: 1; }
-      90%  { opacity: 1; }
-      100% { transform: translateX(-120vw); opacity: 0; }
+      0% {
+        transform: translateX(0);
+        opacity: 0;
+      }
+      12% {
+        opacity: 1;
+      }
+      88% {
+        opacity: 1;
+      }
+      100% {
+        transform: translateX(-120vw);
+        opacity: 0;
+      }
     }
 
-    /* Rocket — rotated to point right */
     .rocket-container {
       position: absolute;
-      left: 50%;
+      left: 16%;
       top: 50%;
       transform: translate(-50%, -50%) rotate(45deg);
-      font-size: 3rem;
-      filter: drop-shadow(0 0 18px rgba(213,16,7,0.5));
-      animation: rocketBob 2s ease-in-out infinite;
-      z-index: 2;
+      font-size: clamp(2.7rem, 5vw, 3.8rem);
       line-height: 1;
+      filter: drop-shadow(0 0 24px rgba(213, 16, 7, 0.5));
+      z-index: 2;
+      animation: rocketBob 2s ease-in-out infinite;
     }
+
     @keyframes rocketBob {
-      0%, 100% { transform: translate(-50%, -50%) rotate(45deg) translateY(0); }
-      50%      { transform: translate(-50%, -50%) rotate(45deg) translateY(-8px); }
+      0%, 100% {
+        transform: translate(-50%, -50%) rotate(45deg) translateY(0);
+      }
+      50% {
+        transform: translate(-50%, -50%) rotate(45deg) translateY(-8px);
+      }
     }
 
-
-    /* Year counter */
     .year-counter {
       position: absolute;
-      top: 14px;
-      right: 18px;
-      font-size: 1.6rem;
+      top: 1.25rem;
+      right: 1.25rem;
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: clamp(2rem, 5vw, 3.6rem);
       font-weight: 700;
-      font-variant-numeric: tabular-nums;
       background: linear-gradient(90deg, #d51007, #ff6b6b);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
+      color: #ff6b6b;
+      letter-spacing: -0.04em;
       z-index: 3;
-      text-shadow: none;
     }
+
     .year-label {
       position: absolute;
-      top: 44px;
-      right: 18px;
-      font-size: 0.65rem;
-      color: #888;
+      top: 5rem;
+      right: 1.35rem;
+      color: rgba(255, 255, 255, 0.58);
+      font-size: 0.72rem;
       text-transform: uppercase;
-      letter-spacing: 0.08em;
+      letter-spacing: 0.16em;
       z-index: 3;
     }
 
-    /* Fun facts area */
+    .travel-kicker {
+      position: absolute;
+      left: 1.25rem;
+      bottom: 1.2rem;
+      max-width: 16rem;
+      color: rgba(255, 255, 255, 0.74);
+      font-size: 0.9rem;
+      line-height: 1.4;
+      z-index: 3;
+    }
+
     .fun-facts-bar {
-      width: 100%;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 0 0 16px 16px;
-      padding: 16px 22px;
-      min-height: 68px;
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 0.9rem;
+      min-height: 4.5rem;
+      width: 100%;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 0 0 1.75rem 1.75rem;
+      background: rgba(30, 27, 58, 0.85);
+      padding: 1rem 1.25rem;
     }
+
     .fact-icon {
-      font-size: 1.4rem;
+      font-size: 1.45rem;
       flex-shrink: 0;
     }
+
     .fact-text {
-      font-size: 0.88rem;
-      color: #bbb;
-      line-height: 1.45;
+      color: #d6d3d1;
+      line-height: 1.5;
       animation: factFade 0.5s ease;
     }
+
     @keyframes factFade {
-      from { opacity: 0; transform: translateY(6px); }
-      to   { opacity: 1; transform: translateY(0); }
+      from {
+        opacity: 0;
+        transform: translateY(6px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
     }
+
     .loading-status {
+      margin-top: 0.85rem;
       text-align: center;
-      margin-top: 10px;
-      font-size: 0.78rem;
-      color: #666;
-    }
-    .loading-status .loading-dots {
-      margin-left: 4px;
+      font-size: 0.86rem;
     }
 
-    footer {
-      margin-top: auto;
-      padding: 2rem 0 1rem;
-      font-size: 0.78rem;
-      color: #555;
-    }
-
-    footer a { color: #d51007; text-decoration: none; }
-
-    /* Config error banner */
     .config-banner {
-      width: min(90vw, 480px);
-      background: rgba(213, 16, 7, 0.12);
+      border-radius: 1.5rem;
       border: 1px solid rgba(213, 16, 7, 0.35);
-      border-radius: 12px;
-      padding: 18px 22px;
-      margin-bottom: 2rem;
-      display: none;
-      animation: slideUp 0.4s ease;
+      background: rgba(213, 16, 7, 0.1);
+      padding: 1rem 1.1rem;
+      animation: slideUp 0.35s ease;
     }
 
-    .config-banner.show { display: block; }
-
-    .config-banner .banner-title {
-      font-weight: 700;
-      font-size: 0.95rem;
+    .banner-title {
       color: #ff6b6b;
-      margin-bottom: 6px;
+      font-weight: 700;
+      margin-bottom: 0.25rem;
     }
 
-    .config-banner .banner-msg {
-      font-size: 0.88rem;
-      color: #ccc;
-      line-height: 1.5;
+    .banner-msg code {
+      border-radius: 0.5rem;
+      background: rgba(255, 255, 255, 0.08);
+      padding: 0.15rem 0.4rem;
     }
 
-    .config-banner code {
-      background: rgba(255,255,255,0.08);
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-size: 0.82rem;
+    .user-profile {
+      align-items: center;
+      gap: 1rem;
+      padding: 1rem 1.1rem;
+      border-radius: 1.25rem;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.04);
     }
 
-    .album-name {
-      font-size: 0.85rem;
-      color: #888;
-      margin-top: 3px;
-      font-style: italic;
+    .user-profile img {
+      width: 3.4rem;
+      height: 3.4rem;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
     }
 
-    .section-divider {
-      width: min(90vw, 480px);
-      border: none;
-      border-top: 1px solid rgba(255,255,255,0.06);
-      margin: 1.5rem 0 0.5rem;
+    .user-name {
+      font-weight: 700;
+      color: #fff;
+      font-size: 1rem;
     }
 
-    /* Mini loading dots */
     .loading-dots {
       display: inline-flex;
-      gap: 4px;
       align-items: center;
-      margin-left: 8px;
+      gap: 0.35rem;
+      margin-left: 0.35rem;
+      vertical-align: middle;
     }
+
     .loading-dots span {
-      width: 6px; height: 6px;
+      width: 0.38rem;
+      height: 0.38rem;
       background: #d51007;
-      border-radius: 50%;
+      border-radius: 999px;
       animation: dotPulse 1.2s ease-in-out infinite;
     }
-    .loading-dots span:nth-child(2) { animation-delay: 0.2s; }
-    .loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+    .loading-dots span:nth-child(2) {
+      animation-delay: 0.2s;
+    }
+
+    .loading-dots span:nth-child(3) {
+      animation-delay: 0.4s;
+    }
+
     @keyframes dotPulse {
-      0%, 60%, 100% { opacity: 0.2; transform: scale(0.8); }
-      30% { opacity: 1; transform: scale(1.2); }
+      0%, 60%, 100% {
+        opacity: 0.2;
+        transform: scale(0.8);
+      }
+      30% {
+        opacity: 1;
+        transform: scale(1.2);
+      }
+    }
+
+    .placeholder-state {
+      border-radius: 1rem;
+      border: 1px dashed rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.02);
+      padding: 1rem;
+      text-align: center;
+      color: #a8a29e;
+      font-size: 0.92rem;
+    }
+
+    @media (max-width: 767px) {
+      .result-header {
+        grid-template-columns: 1fr;
+      }
+
+      .result-header img {
+        width: 88px;
+        height: 88px;
+      }
+
+      .stat-row {
+        gap: 0.85rem;
+      }
+
+      .starfield {
+        height: 200px;
+      }
+
+      .rocket-container {
+        left: 22%;
+      }
+
+      .travel-kicker {
+        max-width: 12rem;
+        font-size: 0.82rem;
+      }
     }
   </style>
 </head>
-<body>
-  <span style="font-size:2.2rem">🕰️🧑‍🚀</span> <h1 style="display:inline">Last.fm Time Traveler</h1>
-  <p class="subtitle">Find the very first time you listened to a song</p>
-
-  <div id="config-banner" class="config-banner">
-    <div class="banner-title">⚠️ Configuration needed</div>
-    <div class="banner-msg" id="banner-msg"></div>
+<body class="min-h-screen overflow-x-hidden bg-ink-950 text-stone-100 antialiased" style="background:linear-gradient(135deg,#0f0c29,#302b63,#24243e)">
+  <div class="pointer-events-none fixed inset-0 overflow-hidden">
+    <div class="absolute left-[-10rem] top-[-8rem] h-72 w-72 rounded-full bg-ember-500/20 blur-3xl"></div>
+    <div class="absolute right-[-6rem] top-24 h-80 w-80 rounded-full bg-purple-500/12 blur-3xl"></div>
+    <div class="absolute bottom-[-8rem] left-1/3 h-96 w-96 rounded-full bg-indigo-700/15 blur-3xl"></div>
+    <div class="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(213,16,7,0.06),transparent_38%),linear-gradient(180deg,rgba(255,255,255,0.02),transparent_35%)]"></div>
   </div>
 
-  <!-- Username input -->
-  <div class="username-section" id="username-section">
-    <div class="username-bar" id="username-bar">
-      <input id="username-input" type="text" placeholder="Enter your Last.fm username…" autocomplete="off" />
-      <button id="connect-btn">Connect</button>
-    </div>
-    <div class="user-profile" id="user-profile">
-      <img id="user-avatar" src="" alt="" />
-      <div class="user-info">
-        <div class="user-name" id="user-display-name"></div>
-        <div class="user-stats" id="user-stats"></div>
-      </div>
-      <button class="change-btn" id="change-user-btn">Change</button>
-    </div>
-  </div>
+  <div class="relative mx-auto flex min-h-screen w-full max-w-7xl flex-col px-4 py-5 sm:px-6 lg:px-8 lg:py-8">
+    <header class="mb-6 grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(19rem,0.9fr)]">
+      <section class="glass-panel rounded-[2rem] px-5 py-6 sm:px-7 sm:py-7 lg:px-8 lg:py-8">
+        <div class="mb-4 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-stone-300">
+          <span>Scrobble archaeology</span>
+          <span class="text-red-400">since 2002</span>
+        </div>
+        <div>
+          <p class="mb-3 text-3xl sm:text-4xl">🕰️🧑‍🚀</p>
+          <h1 class="text-4xl font-bold leading-none sm:text-5xl lg:text-6xl" style="background:linear-gradient(90deg,#d51007,#ff6b6b);-webkit-background-clip:text;-webkit-text-fill-color:transparent">Last.fm Time Traveler</h1>
+          <p class="mt-4 max-w-2xl text-base leading-7 text-stone-300 sm:text-lg">
+            Find the exact moment a track entered your listening history, then branch out into your current favorites and the songs you played on this day in past years.
+          </p>
+        </div>
+        <div class="mt-6 grid gap-3 grid-cols-1 sm:grid-cols-3">
+          <div class="rounded-2xl border border-white/8 bg-white/4 px-4 py-4">
+            <div class="text-xs uppercase tracking-[0.16em] text-stone-400">Autocomplete</div>
+            <div class="mt-2 text-lg font-semibold text-white">Fast track lookup</div>
+          </div>
+          <div class="rounded-2xl border border-white/8 bg-white/4 px-4 py-4">
+            <div class="text-xs uppercase tracking-[0.16em] text-stone-400">Time travel</div>
+            <div class="mt-2 text-lg font-semibold text-white">First scrobble date</div>
+          </div>
+          <div class="rounded-2xl border border-white/8 bg-white/4 px-4 py-4">
+            <div class="text-xs uppercase tracking-[0.16em] text-stone-400">Context</div>
+            <div class="mt-2 text-lg font-semibold text-white">Top tracks and anniversaries</div>
+          </div>
+        </div>
+      </section>
 
-  <!-- Search section (shown after connecting) -->
-  <div class="search-section" id="search-section">
-    <div class="search-container">
-      <input id="search" type="text" placeholder="Start typing a song title…" autocomplete="off" />
-      <div id="ac-list" class="autocomplete-list"></div>
-    </div>
-  </div>
+      <section class="glass-panel rounded-[2rem] px-5 py-6 sm:px-7 sm:py-7">
+        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-400">How it works</div>
+        <div class="mt-3 space-y-4 text-sm leading-6 text-stone-300 sm:text-[0.96rem]">
+          <p>Connect a Last.fm profile, search for any song, and the app walks backward through your scrobble history to find the earliest match it can verify.</p>
+          <p>The desktop layout keeps the search flow on the left and your discovery panels on the right, so you can compare results without losing context.</p>
+        </div>
+        <div class="mt-6 grid gap-3 sm:grid-cols-2">
+          <div class="rounded-2xl border border-white/8 bg-white/4 p-4">
+            <div class="text-xs uppercase tracking-[0.16em] text-stone-400">Best for</div>
+            <div class="mt-2 text-base font-semibold text-white">Revisiting old obsessions</div>
+          </div>
+          <div class="rounded-2xl border border-white/8 bg-white/4 p-4">
+            <div class="text-xs uppercase tracking-[0.16em] text-stone-400">Good to know</div>
+            <div class="mt-2 text-base font-semibold text-white">Older sparse plays can still be limited by Last.fm history exposure</div>
+          </div>
+        </div>
+      </section>
+    </header>
 
-  <!-- Time-travel loading screen -->
-  <div id="loading-screen" class="loading-screen">
-    <div class="starfield" id="starfield">
-      <div class="rocket-container">🚀</div>
-      <div class="year-counter" id="year-counter">2026</div>
-      <div class="year-label">Traveling to…</div>
+    <div id="config-banner" class="config-banner mb-6 w-full show-animate">
+      <div class="banner-title">Configuration needed</div>
+      <div class="banner-msg" id="banner-msg"></div>
     </div>
-    <div class="fun-facts-bar">
-      <span class="fact-icon" id="fact-icon">🎵</span>
-      <span class="fact-text" id="fact-text">Searching through time…</span>
-    </div>
-    <div class="loading-status">Scanning your scrobble history<span class="loading-dots"><span></span><span></span><span></span></span></div>
-  </div>
-  <div id="result" class="result-card"></div>
 
-  <!-- Top tracks suggestions -->
-  <div class="top-tracks-section" id="top-tracks-section">
-    <div class="section-header">
-      <span class="section-title">🎵 Your top tracks</span>
-      <select class="period-select" id="period-select">
-        <option value="7day">Last 7 days</option>
-        <option value="1month" selected>Last month</option>
-        <option value="3month">Last 3 months</option>
-        <option value="6month">Last 6 months</option>
-        <option value="12month">Last year</option>
-        <option value="overall">All time</option>
-      </select>
-    </div>
-    <div class="top-tracks-grid" id="top-tracks-grid"></div>
-  </div>
+    <main class="grid flex-1 gap-6 xl:grid-cols-[minmax(0,1.1fr)_minmax(24rem,0.9fr)] xl:items-start">
+      <section class="space-y-6">
+        <section class="glass-panel relative z-10 overflow-visible rounded-[2rem] px-5 py-6 sm:px-7 sm:py-7 lg:px-8">
+          <div class="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <div class="section-eyebrow text-xs font-semibold uppercase tracking-[0.16em]">Profile</div>
+              <h2 class="mt-2 text-2xl font-bold text-white">Connect your listening history</h2>
+            </div>
+            <p class="max-w-md text-sm leading-6 text-stone-400">Once connected, search stays pinned in the main column while the side panels fill out with context.</p>
+          </div>
 
-  <!-- On This Day section -->
-  <div class="on-this-day-section" id="on-this-day-section">
-    <div class="section-header">
-      <span class="section-title">📅 On this day…</span>
-      <div class="loading-dots" id="otd-loading" style="display:none">
-        <span></span><span></span><span></span>
-      </div>
-    </div>
-    <div id="on-this-day-content"></div>
-  </div>
+          <div class="mt-6" id="username-section">
+            <div class="flex flex-col gap-3 sm:flex-row" id="username-bar">
+              <input id="username-input" class="field-input flex-1 px-4 py-4 text-base" type="text" placeholder="Enter your Last.fm username..." autocomplete="off" />
+              <button id="connect-btn" class="primary-button px-5 py-4 text-sm sm:min-w-36">Connect</button>
+            </div>
 
-  <footer>
-    Powered by <a href="https://www.last.fm/api" target="_blank">Last.fm API</a>
-  </footer>
+            <div class="user-profile show-animate" id="user-profile">
+              <img id="user-avatar" src="" alt="" />
+              <div class="min-w-0 flex-1">
+                <div class="user-name" id="user-display-name"></div>
+                <div class="user-stats" id="user-stats"></div>
+              </div>
+              <button class="ghost-button px-4 py-2 text-sm font-medium" id="change-user-btn">Change</button>
+            </div>
+          </div>
+
+          <div id="search-section" class="mt-6 show-animate">
+            <div class="flex items-center justify-between gap-3">
+              <div>
+                <div class="section-eyebrow text-xs font-semibold uppercase tracking-[0.16em]">Track search</div>
+                <div class="mt-2 text-lg font-semibold text-white">Search a song and jump back to the first scrobble</div>
+              </div>
+            </div>
+            <div class="search-container relative mt-4">
+              <input id="search" class="field-input px-5 py-4 text-base sm:text-lg" type="text" placeholder="Start typing a song title..." autocomplete="off" />
+              <div id="ac-list" class="autocomplete-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <div id="loading-screen" class="loading-screen show-animate">
+          <div class="starfield" id="starfield">
+            <div class="rocket-container">🚀</div>
+            <div class="year-counter" id="year-counter">2026</div>
+            <div class="year-label">Traveling to</div>
+            <div class="travel-kicker">Scanning your scrobble history for the earliest confirmed listen.</div>
+          </div>
+          <div class="fun-facts-bar">
+            <span class="fact-icon" id="fact-icon">🎵</span>
+            <span class="fact-text" id="fact-text">Searching through time...</span>
+          </div>
+          <div class="loading-status">Scanning your scrobble history<span class="loading-dots"><span></span><span></span><span></span></span></div>
+        </div>
+
+        <div id="result" class="result-card"></div>
+      </section>
+
+      <aside class="space-y-6">
+        <section id="top-tracks-section" class="glass-panel rounded-[2rem] px-5 py-6 sm:px-7 sm:py-7 show-animate">
+          <div class="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div class="section-eyebrow text-xs font-semibold uppercase tracking-[0.16em]">Current context</div>
+              <div class="section-title mt-2">🎵 Your top tracks</div>
+            </div>
+            <select class="period-select" id="period-select">
+              <option value="7day">Last 7 days</option>
+              <option value="1month" selected>Last month</option>
+              <option value="3month">Last 3 months</option>
+              <option value="6month">Last 6 months</option>
+              <option value="12month">Last year</option>
+              <option value="overall">All time</option>
+            </select>
+          </div>
+          <div class="top-tracks-grid" id="top-tracks-grid"></div>
+        </section>
+
+        <section id="on-this-day-section" class="glass-panel rounded-[2rem] px-5 py-6 sm:px-7 sm:py-7 show-animate">
+          <div class="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div class="section-eyebrow text-xs font-semibold uppercase tracking-[0.16em]">Anniversary view</div>
+              <div class="section-title mt-2">📅 On this day</div>
+            </div>
+            <div class="loading-dots" id="otd-loading" style="display:none">
+              <span></span><span></span><span></span>
+            </div>
+          </div>
+          <div id="on-this-day-content"></div>
+        </section>
+      </aside>
+    </main>
+
+    <footer class="pt-8 text-sm text-stone-500">
+      Powered by <a class="text-red-400 transition hover:text-red-300" href="https://www.last.fm/api" target="_blank" rel="noreferrer">Last.fm API</a>
+    </footer>
+  </div>
 
   <script>
     const searchInput = document.getElementById('search');
     const acList = document.getElementById('ac-list');
     const resultCard = document.getElementById('result');
-    // spinner replaced by loading-screen
     const configBanner = document.getElementById('config-banner');
     const bannerMsg = document.getElementById('banner-msg');
     const usernameInput = document.getElementById('username-input');
@@ -803,7 +920,6 @@
     let configOk = false;
     let currentUsername = '';
 
-    // === Time-travel loading animation ===
     const loadingScreen = document.getElementById('loading-screen');
     const yearCounter = document.getElementById('year-counter');
     const factText = document.getElementById('fact-text');
@@ -816,25 +932,29 @@
     const musicFacts = [
       { icon: '🎸', text: 'The longest officially released song is "The Rise and Fall of Bossanova" at 13 hours, 23 minutes and 32 seconds.' },
       { icon: '💿', text: 'The first CD pressed in the US was Bruce Springsteen\'s "Born in the U.S.A." in 1984.' },
-      { icon: '🎵', text: 'The first MP3 ever created was Suzanne Vega\'s "Tom\'s Diner" — used as a test track by the format\'s inventor.' },
+      { icon: '🎵', text: 'The first MP3 ever created was Suzanne Vega\'s "Tom\'s Diner" and it was used as a test track by the format\'s inventor.' },
       { icon: '📻', text: 'The first song played on MTV was "Video Killed the Radio Star" by The Buggles on August 1, 1981.' },
-      { icon: '🎹', text: '"Happy Birthday" was copyrighted until 2016 — for decades, restaurants had to pay royalties to sing it.' },
+      { icon: '🎹', text: '"Happy Birthday" was copyrighted until 2016, so restaurants had to pay royalties to sing it for decades.' },
       { icon: '🎤', text: 'Freddie Mercury\'s vocal range spanned four octaves, from bass low F to soprano high F.' },
-      { icon: '🥁', text: 'A vinyl record can hold about 22 minutes of music per side — that\'s why classic albums are ~44 minutes.' },
-      { icon: '🎧', text: 'Spotify\'s most-streamed song ever is "Blinding Lights" by The Weeknd with over 4 billion streams.' },
+      { icon: '🥁', text: 'A vinyl record can hold about 22 minutes of music per side, which is why many classic albums sit around 44 minutes.' },
+      { icon: '🎧', text: 'Spotify\'s most-streamed song ever is "Blinding Lights" by The Weeknd with more than 4 billion streams.' },
       { icon: '🎷', text: 'The saxophone was invented in 1846 by Adolphe Sax, a Belgian instrument maker.' },
-      { icon: '🎻', text: 'A Stradivarius violin from 1721 sold for $15.9 million — the most expensive instrument ever.' },
-      { icon: '📀', text: 'Michael Jackson\'s "Thriller" remains the best-selling album of all time with 70 million copies sold.' },
+      { icon: '🎻', text: 'A Stradivarius violin from 1721 sold for $15.9 million, making it the most expensive instrument ever sold.' },
+      { icon: '📀', text: 'Michael Jackson\'s "Thriller" remains the best-selling album of all time with around 70 million copies sold.' },
       { icon: '🎶', text: 'The shortest song ever recorded is "You Suffer" by Napalm Death at 1.316 seconds.' },
-      { icon: '🎺', text: 'Louis Armstrong\'s "What a Wonderful World" was a flop in the US but #1 in the UK when released in 1967.' },
+      { icon: '🎺', text: 'Louis Armstrong\'s "What a Wonderful World" flopped in the US but went to number one in the UK in 1967.' },
       { icon: '🪕', text: 'The banjo originated in Africa and was brought to the Americas by enslaved people in the 17th century.' },
-      { icon: '🎵', text: 'Last.fm has tracked over 100 billion scrobbles since its launch in 2002.' },
-      { icon: '🌍', text: 'Finland has the most metal bands per capita — about 54 metal bands per 100,000 people.' },
+      { icon: '🎵', text: 'Last.fm has tracked more than 100 billion scrobbles since its launch in 2002.' },
+      { icon: '🌍', text: 'Finland has the most metal bands per capita, with roughly 54 metal bands per 100,000 people.' },
       { icon: '🎸', text: 'Jimi Hendrix was self-taught and played a right-handed guitar flipped upside down.' },
-      { icon: '🎤', text: 'The word "rhythm" is the longest English word without a vowel.' },
+      { icon: '🎤', text: 'The word "rhythm" is one of the longest English words without a traditional vowel.' },
       { icon: '💿', text: 'Pink Floyd\'s "The Dark Side of the Moon" spent 937 weeks on the Billboard 200 chart.' },
-      { icon: '🎧', text: 'The first online music store was eMusic, launched in 1998 — five years before iTunes.' },
+      { icon: '🎧', text: 'The first online music store was eMusic, launched in 1998, five years before iTunes.' }
     ];
+
+    function placeholderState(message) {
+      return `<div class="placeholder-state">${escHtml(message)}</div>`;
+    }
 
     function generateStars() {
       if (starsGenerated) return;
@@ -856,7 +976,7 @@
     function startLoadingAnimation() {
       generateStars();
       loadingScreen.classList.add('show');
-      // Year countdown
+
       let year = new Date().getFullYear();
       yearCounter.textContent = year;
       yearInterval = setInterval(() => {
@@ -864,19 +984,22 @@
         if (year < 1950) year = new Date().getFullYear();
         yearCounter.textContent = year;
       }, 600);
-      // Fun facts rotation
+
       let lastIdx = -1;
       function showRandomFact() {
         let idx;
-        do { idx = Math.floor(Math.random() * musicFacts.length); } while (idx === lastIdx);
+        do {
+          idx = Math.floor(Math.random() * musicFacts.length);
+        } while (idx === lastIdx);
         lastIdx = idx;
-        const f = musicFacts[idx];
-        factIcon.textContent = f.icon;
+        const fact = musicFacts[idx];
+        factIcon.textContent = fact.icon;
         factText.style.animation = 'none';
-        factText.offsetHeight; // trigger reflow
+        factText.offsetHeight;
         factText.style.animation = '';
-        factText.textContent = f.text;
+        factText.textContent = fact.text;
       }
+
       showRandomFact();
       factInterval = setInterval(showRandomFact, 3500);
     }
@@ -889,11 +1012,10 @@
       factInterval = null;
     }
 
-    // Cookie helpers
     function setCookie(name, value, days = 365) {
-      const d = new Date();
-      d.setTime(d.getTime() + days * 86400000);
-      document.cookie = `${name}=${encodeURIComponent(value)};expires=${d.toUTCString()};path=/;SameSite=Lax`;
+      const expiry = new Date();
+      expiry.setTime(expiry.getTime() + days * 86400000);
+      document.cookie = `${name}=${encodeURIComponent(value)};expires=${expiry.toUTCString()};path=/;SameSite=Lax`;
     }
 
     function getCookie(name) {
@@ -901,7 +1023,6 @@
       return match ? decodeURIComponent(match[2]) : '';
     }
 
-    // Check API config on load, then restore username from cookie
     (async () => {
       try {
         const res = await fetch('/api/status');
@@ -925,16 +1046,15 @@
       }
     })();
 
-    // Connect user
     connectBtn.addEventListener('click', () => {
-      const u = usernameInput.value.trim();
-      if (u) connectUser(u);
+      const username = usernameInput.value.trim();
+      if (username) connectUser(username);
     });
 
-    usernameInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        const u = usernameInput.value.trim();
-        if (u) connectUser(u);
+    usernameInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        const username = usernameInput.value.trim();
+        if (username) connectUser(username);
       }
     });
 
@@ -946,13 +1066,15 @@
       topTracksSection.classList.remove('show');
       otdSection.classList.remove('show');
       resultCard.classList.remove('show');
+      searchInput.value = '';
       usernameInput.value = '';
       usernameInput.focus();
     });
 
     async function connectUser(username) {
       connectBtn.disabled = true;
-      connectBtn.textContent = '…';
+      connectBtn.textContent = '...';
+
       try {
         const res = await fetch(`/api/user/validate?username=${encodeURIComponent(username)}`);
         const data = await res.json();
@@ -962,79 +1084,77 @@
           connectBtn.textContent = 'Connect';
           return;
         }
+
         currentUsername = data.username;
         setCookie('lastfm_username', currentUsername);
 
-        // Show profile bar
         document.getElementById('user-avatar').src = data.image || defaultAvatar();
         document.getElementById('user-display-name').textContent = data.username;
-        const regStr = typeof data.registered === 'string' ? data.registered : '';
+        const registered = typeof data.registered === 'string' ? data.registered : '';
         document.getElementById('user-stats').textContent =
-          `${data.playcount.toLocaleString()} scrobbles` +
-          (regStr ? ` · since ${regStr}` : '');
+          `${data.playcount.toLocaleString()} scrobbles` + (registered ? ` · since ${registered}` : '');
 
         usernameBar.style.display = 'none';
         userProfile.classList.add('show');
         searchSection.classList.add('show');
         searchInput.focus();
 
-        // Load top tracks and On This Day in parallel
         loadTopTracks();
         loadOnThisDay();
-      } catch (err) {
+      } catch {
         alert('Could not connect. Please try again.');
       }
+
       connectBtn.disabled = false;
       connectBtn.textContent = 'Connect';
     }
 
-    // Top tracks
     periodSelect.addEventListener('change', () => loadTopTracks());
 
     async function loadTopTracks() {
       if (!currentUsername) return;
-      topTracksGrid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#666;padding:16px;">Loading…</div>';
+      topTracksGrid.innerHTML = placeholderState('Loading top tracks...');
       topTracksSection.classList.add('show');
+
       try {
-        const res = await fetch(
-          `/api/user/top-tracks?username=${encodeURIComponent(currentUsername)}&period=${periodSelect.value}`
-        );
+        const res = await fetch(`/api/user/top-tracks?username=${encodeURIComponent(currentUsername)}&period=${periodSelect.value}`);
         const tracks = await res.json();
         if (!tracks.length) {
-          topTracksGrid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#666;padding:16px;">No top tracks for this period.</div>';
+          topTracksGrid.innerHTML = placeholderState('No top tracks for this period.');
           return;
         }
-        topTracksGrid.innerHTML = tracks.map((t, i) => `
-          <div class="top-track-card" data-idx="${i}">
-            <img src="${t.image || defaultThumb()}" alt="" />
+
+        topTracksGrid.innerHTML = tracks.map((track, index) => `
+          <div class="top-track-card" data-idx="${index}">
+            <img src="${track.image || defaultThumb()}" alt="" />
             <div class="tt-text">
-              <div class="tt-name">${escHtml(t.name)}</div>
-              <div class="tt-artist">${escHtml(t.artist)}</div>
-              <div class="tt-plays">${t.playcount} plays</div>
+              <div class="tt-name">${escHtml(track.name)}</div>
+              <div class="tt-artist">${escHtml(track.artist)}</div>
+              <div class="tt-plays">${track.playcount} plays</div>
             </div>
           </div>
         `).join('');
-        // Apply artist image fallback for tracks without images
-        topTracksGrid.querySelectorAll('.top-track-card').forEach(el => {
-          const t = tracks[+el.dataset.idx];
-          if (!t.image) {
-            applyArtistFallback(el.querySelector('img'), t.artist);
+
+        topTracksGrid.querySelectorAll('.top-track-card').forEach((el) => {
+          const track = tracks[Number(el.dataset.idx)];
+          if (!track.image) {
+            applyArtistFallback(el.querySelector('img'), track.artist);
           }
           el.addEventListener('click', () => {
-            selectResult({ name: t.name, artist: t.artist, image: t.image });
+            selectResult({ name: track.name, artist: track.artist, image: track.image });
           });
         });
       } catch {
-        topTracksGrid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#666;padding:16px;">Could not load top tracks.</div>';
+        topTracksGrid.innerHTML = placeholderState('Could not load top tracks.');
       }
     }
 
-    // On This Day
     async function loadOnThisDay() {
       if (!currentUsername) return;
       otdLoading.style.display = 'inline-flex';
       otdContent.innerHTML = '';
       otdSection.classList.add('show');
+
       try {
         const res = await fetch(`/api/on-this-day?username=${encodeURIComponent(currentUsername)}`);
         const periods = await res.json();
@@ -1045,21 +1165,21 @@
           return;
         }
 
-        otdContent.innerHTML = periods.map(p => `
+        otdContent.innerHTML = periods.map((period) => `
           <div class="otd-period">
             <div class="otd-period-header">
-              <span class="otd-years-badge">${p.years_ago} year${p.years_ago > 1 ? 's' : ''} ago</span>
-              <span class="otd-date">${p.date}</span>
-              <span class="otd-total">${p.total_scrobbles} scrobbles that day</span>
+              <span class="otd-years-badge">${period.years_ago} year${period.years_ago > 1 ? 's' : ''} ago</span>
+              <span class="otd-date">${period.date}</span>
+              <span class="otd-total">${period.total_scrobbles} scrobbles that day</span>
             </div>
             <div class="otd-tracks">
-              ${p.tracks.map(t => `
-                <div class="otd-track" data-name="${escAttr(t.name)}" data-artist="${escAttr(t.artist)}">
-                  <img src="${t.image || defaultThumb()}" alt="" />
+              ${period.tracks.map((track) => `
+                <div class="otd-track" data-name="${escAttr(track.name)}" data-artist="${escAttr(track.artist)}">
+                  <img src="${track.image || defaultThumb()}" alt="" />
                   <div class="otd-text">
-                    <div class="otd-name">${escHtml(t.name)}</div>
-                    <div class="otd-artist">${escHtml(t.artist)}</div>
-                    <div class="otd-plays">${t.plays}× that day</div>
+                    <div class="otd-name">${escHtml(track.name)}</div>
+                    <div class="otd-artist">${escHtml(track.artist)}</div>
+                    <div class="otd-plays">${track.plays}× that day</div>
                   </div>
                 </div>
               `).join('')}
@@ -1067,7 +1187,7 @@
           </div>
         `).join('');
 
-        otdContent.querySelectorAll('.otd-track').forEach(el => {
+        otdContent.querySelectorAll('.otd-track').forEach((el) => {
           const img = el.querySelector('img');
           if (img && img.src.startsWith('data:')) {
             applyArtistFallback(img, el.dataset.artist);
@@ -1082,69 +1202,78 @@
       }
     }
 
-    // Debounced autocomplete search
     searchInput.addEventListener('input', () => {
       clearTimeout(debounceTimer);
-      const q = searchInput.value.trim();
-      if (q.length < 2) { hideAC(); return; }
-      debounceTimer = setTimeout(() => fetchAutocomplete(q), 300);
+      const query = searchInput.value.trim();
+      if (query.length < 2) {
+        hideAC();
+        return;
+      }
+      debounceTimer = setTimeout(() => fetchAutocomplete(query), 300);
     });
 
-    searchInput.addEventListener('keydown', (e) => {
+    searchInput.addEventListener('keydown', (event) => {
       if (!acList.classList.contains('show')) return;
       const items = acList.querySelectorAll('.ac-item');
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
         activeIdx = Math.min(activeIdx + 1, items.length - 1);
         highlightItem(items);
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
+      } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
         activeIdx = Math.max(activeIdx - 1, 0);
         highlightItem(items);
-      } else if (e.key === 'Enter' && activeIdx >= 0) {
-        e.preventDefault();
+      } else if (event.key === 'Enter' && activeIdx >= 0) {
+        event.preventDefault();
         selectResult(currentResults[activeIdx]);
-      } else if (e.key === 'Escape') {
+      } else if (event.key === 'Escape') {
         hideAC();
       }
     });
 
-    document.addEventListener('click', (e) => {
-      if (!e.target.closest('.search-container')) hideAC();
+    document.addEventListener('click', (event) => {
+      if (!event.target.closest('.search-container')) hideAC();
     });
 
-    async function fetchAutocomplete(q) {
+    async function fetchAutocomplete(query) {
       try {
-        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+        const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
         currentResults = await res.json();
         renderAC(currentResults);
-      } catch { hideAC(); }
+      } catch {
+        hideAC();
+      }
     }
 
     function renderAC(items) {
-      if (!items.length) { hideAC(); return; }
+      if (!items.length) {
+        hideAC();
+        return;
+      }
+
       activeIdx = -1;
-      acList.innerHTML = items.map((t, i) => `
-        <div class="ac-item" data-idx="${i}">
-          <img src="${t.image || defaultThumb()}" alt="" />
+      acList.innerHTML = items.map((track, index) => `
+        <div class="ac-item" data-idx="${index}">
+          <img src="${track.image || defaultThumb()}" alt="" />
           <div class="ac-text">
-            <span class="ac-track">${escHtml(t.name)}</span>
-            <span class="ac-artist">${escHtml(t.artist)}</span>
+            <span class="ac-track">${escHtml(track.name)}</span>
+            <span class="ac-artist">${escHtml(track.artist)}</span>
           </div>
         </div>
       `).join('');
-      acList.querySelectorAll('.ac-item').forEach(el => {
-        const t = items[+el.dataset.idx];
-        if (!t.image) {
-          applyArtistFallback(el.querySelector('img'), t.artist);
+
+      acList.querySelectorAll('.ac-item').forEach((el) => {
+        const track = items[Number(el.dataset.idx)];
+        if (!track.image) {
+          applyArtistFallback(el.querySelector('img'), track.artist);
         }
-        el.addEventListener('click', () => selectResult(currentResults[+el.dataset.idx]));
+        el.addEventListener('click', () => selectResult(currentResults[Number(el.dataset.idx)]));
       });
       acList.classList.add('show');
     }
 
     function highlightItem(items) {
-      items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
+      items.forEach((el, index) => el.classList.toggle('active', index === activeIdx));
     }
 
     function hideAC() {
@@ -1160,9 +1289,7 @@
       startLoadingAnimation();
 
       try {
-        const res = await fetch(
-          `/api/first-listen?track=${encodeURIComponent(track.name)}&artist=${encodeURIComponent(track.artist)}&username=${encodeURIComponent(currentUsername)}`
-        );
+        const res = await fetch(`/api/first-listen?track=${encodeURIComponent(track.name)}&artist=${encodeURIComponent(track.artist)}&username=${encodeURIComponent(currentUsername)}`);
         const data = await res.json();
         stopLoadingAnimation();
 
@@ -1172,7 +1299,7 @@
         }
 
         if (!data.found) {
-          resultCard.innerHTML = `<div class="not-found">😔 You've never listened to <strong>${escHtml(track.name)}</strong> by ${escHtml(track.artist)}.</div>`;
+          resultCard.innerHTML = `<div class="not-found">😔 You have never listened to <strong>${escHtml(track.name)}</strong> by ${escHtml(track.artist)}.</div>`;
           resultCard.classList.add('show');
           return;
         }
@@ -1190,12 +1317,12 @@
           ? `${data.date_unavailable_reason || 'Last.fm does not expose the exact timestamp for this play.'} This can happen when the profile or recent tracks are private, or when Last.fm omits older low-play scrobbles from its public API.`
           : '';
 
-        const imgSrc = data.image || defaultAlbumArt();
+        const imageSrc = data.image || defaultAlbumArt();
         const resultNeedsArtistFallback = !data.image;
 
         resultCard.innerHTML = `
           <div class="result-header">
-            <img src="${imgSrc}" alt="Album art" id="result-art" />
+            <img src="${imageSrc}" alt="Album art" id="result-art" />
             <div class="result-meta">
               <h2>${escHtml(data.track)}</h2>
               <div class="artist-name">${escHtml(data.artist)}</div>
@@ -1231,45 +1358,47 @@
         if (resultNeedsArtistFallback) {
           applyArtistFallback(document.getElementById('result-art'), data.artist);
         }
-      } catch (err) {
+      } catch {
         stopLoadingAnimation();
         showError('Something went wrong. Please try again.');
       }
     }
 
-    function showError(msg) {
-      resultCard.innerHTML = `<div class="not-found">⚠️ ${escHtml(msg)}</div>`;
+    function showError(message) {
+      resultCard.innerHTML = `<div class="not-found">⚠️ ${escHtml(message)}</div>`;
       resultCard.classList.add('show');
     }
 
     function relativeTime(date) {
       const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
       const intervals = [
-        [31536000, 'year'], [2592000, 'month'], [86400, 'day'],
-        [3600, 'hour'], [60, 'minute']
+        [31536000, 'year'],
+        [2592000, 'month'],
+        [86400, 'day'],
+        [3600, 'hour'],
+        [60, 'minute']
       ];
-      for (const [secs, label] of intervals) {
-        const count = Math.floor(seconds / secs);
+      for (const [amount, label] of intervals) {
+        const count = Math.floor(seconds / amount);
         if (count >= 1) return `${count} ${label}${count > 1 ? 's' : ''} ago`;
       }
       return 'just now';
     }
 
-    function escHtml(s) {
-      const d = document.createElement('div');
-      d.textContent = s;
-      return d.innerHTML;
+    function escHtml(value) {
+      const div = document.createElement('div');
+      div.textContent = value;
+      return div.innerHTML;
     }
 
-    function escAttr(s) {
-      return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    function escAttr(value) {
+      return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 
     function defaultThumb() {
-      return "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2240%22 height=%2240%22><rect fill=%22%23333%22 width=%2240%22 height=%2240%22/><text x=%2220%22 y=%2224%22 text-anchor=%22middle%22 fill=%22%23666%22 font-size=%2218%22>♪</text></svg>";
+      return 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2248%22 height=%2248%22><rect fill=%22%23302f2f%22 width=%2248%22 height=%2248%22 rx=%2214%22/><text x=%2224%22 y=%2229%22 text-anchor=%22middle%22 fill=%22%23878787%22 font-size=%2220%22>♪</text></svg>';
     }
 
-    // Artist image cache & fallback
     const artistImageCache = {};
 
     async function fetchArtistImage(artist) {
@@ -1291,11 +1420,11 @@
     }
 
     function defaultAlbumArt() {
-      return "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22100%22 height=%22100%22><rect fill=%22%23222%22 width=%22100%22 height=%22100%22/><text x=%2250%22 y=%2258%22 text-anchor=%22middle%22 fill=%22%23555%22 font-size=%2240%22>♪</text></svg>";
+      return 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22112%22 height=%22112%22><rect fill=%22%23201f1f%22 width=%22112%22 height=%22112%22 rx=%2220%22/><text x=%2256%22 y=%2265%22 text-anchor=%22middle%22 fill=%22%23555%22 font-size=%2242%22>♪</text></svg>';
     }
 
     function defaultAvatar() {
-      return "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2242%22 height=%2242%22><rect fill=%22%23333%22 width=%2242%22 height=%2242%22 rx=%2221%22/><text x=%2221%22 y=%2226%22 text-anchor=%22middle%22 fill=%22%23777%22 font-size=%2220%22>👤</text></svg>";
+      return 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2254%22 height=%2254%22><rect fill=%22%23302f2f%22 width=%2254%22 height=%2254%22 rx=%2227%22/><text x=%2227%22 y=%2233%22 text-anchor=%22middle%22 fill=%22%23878787%22 font-size=%2222%22>👤</text></svg>';
     }
   </script>
 </body>
