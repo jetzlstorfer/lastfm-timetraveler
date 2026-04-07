@@ -16,13 +16,17 @@ param resourceToken string
 param lastfmApiKey string = ''
 
 var normalizedEnvironmentName = toLower(replace(replace(environmentName, '_', '-'), ' ', '-'))
+var compactEnvironmentName = take(toLower(replace(replace(replace(replace(environmentName, '-', ''), '_', ''), ' ', ''), '.', '')), 41)
+var acrName = 'acr${compactEnvironmentName}${take(resourceToken, 6)}'
+var logAnalyticsName = take('log-${normalizedEnvironmentName}', 63)
+var containerAppsEnvironmentName = take('cae-${normalizedEnvironmentName}', 32)
 var containerAppName = take('ca-${normalizedEnvironmentName}', 32)
 
 // ---------------------------------------------------------------------------
 // Log Analytics Workspace (required by Container Apps Environment)
 // ---------------------------------------------------------------------------
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
-  name: 'log-${resourceToken}'
+  name: logAnalyticsName
   location: location
   tags: tags
   properties: {
@@ -37,7 +41,7 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
 // Azure Container Registry
 // ---------------------------------------------------------------------------
 resource acr 'Microsoft.ContainerRegistry/registries@2023-01-01-preview' = {
-  name: 'acr${resourceToken}'
+  name: acrName
   location: location
   tags: tags
   sku: {
@@ -52,7 +56,7 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-01-01-preview' = {
 // Container Apps Environment
 // ---------------------------------------------------------------------------
 resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2023-05-01' = {
-  name: 'cae-${resourceToken}'
+  name: containerAppsEnvironmentName
   location: location
   tags: tags
   properties: {

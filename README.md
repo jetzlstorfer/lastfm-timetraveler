@@ -51,7 +51,9 @@ This single command will:
 2. Provision all infrastructure (**Container Apps Environment**, **Container App**, **Log Analytics**)
 3. Deploy the application to **Azure Container Apps**
 
-The Container App name is derived from `AZURE_ENV_NAME`, so with `lastfm-timetraveler` the default app URL will be similar to:
+The resource group, Container App, Container Apps environment, and Log Analytics workspace names are derived from `AZURE_ENV_NAME`. The Azure Container Registry name also uses `AZURE_ENV_NAME`, with a short stable hash suffix because registry names must be globally unique and alphanumeric.
+
+With `lastfm-timetraveler`, the default app URL will be similar to:
 
 ```text
 https://ca-lastfm-timetraveler.<managed-environment-suffix>.swedencentral.azurecontainerapps.io
