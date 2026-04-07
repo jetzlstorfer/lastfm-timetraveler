@@ -21,6 +21,42 @@ var acrName = 'acr${compactEnvironmentName}${take(resourceToken, 6)}'
 var logAnalyticsName = take('log-${normalizedEnvironmentName}', 63)
 var containerAppsEnvironmentName = take('cae-${normalizedEnvironmentName}', 32)
 var containerAppName = take('ca-${normalizedEnvironmentName}', 32)
+var storageAccountName = take('st${compactEnvironmentName}${take(resourceToken, 6)}', 24)
+var fileShareName = 'timetravelerdb'
+var storageMountName = 'dbstorage'
+var dbMountPath = '/data'
+var dbPath = '${dbMountPath}/timetraveler.db'
+
+// ---------------------------------------------------------------------------
+// Storage Account + File Share (persistent SQLite database volume)
+// ---------------------------------------------------------------------------
+resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
+  name: storageAccountName
+  location: location
+  tags: tags
+  kind: 'StorageV2'
+  sku: {
+    name: 'Standard_LRS'
+  }
+  properties: {
+    minimumTlsVersion: 'TLS1_2'
+    allowBlobPublicAccess: false
+    supportsHttpsTrafficOnly: true
+  }
+}
+
+resource fileService 'Microsoft.Storage/storageAccounts/fileServices@2023-01-01' = {
+  name: 'default'
+  parent: storageAccount
+}
+
+resource fileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-01-01' = {
+  name: fileShareName
+  parent: fileService
+  properties: {
+    shareQuota: 1
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Log Analytics Workspace (required by Container Apps Environment)
@@ -70,6 +106,20 @@ resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2023-05-01'
   }
 }
 
+// Register the Azure Files share as a named storage on the environment
+resource envStorage 'Microsoft.App/managedEnvironments/storages@2023-05-01' = {
+  name: storageMountName
+  parent: containerAppsEnvironment
+  properties: {
+    azureFile: {
+      accountName: storageAccount.name
+      accountKey: storageAccount.listKeys().keys[0].value
+      shareName: fileShareName
+      accessMode: 'ReadWrite'
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Container App
 // ---------------------------------------------------------------------------
@@ -114,11 +164,21 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
               name: 'LASTFM_API_KEY'
               secretRef: 'lastfm-api-key'
             }
+            {
+              name: 'DB_PATH'
+              value: dbPath
+            }
           ]
           resources: {
             cpu: json('0.5')
             memory: '1Gi'
           }
+          volumeMounts: [
+            {
+              volumeName: 'dbvolume'
+              mountPath: dbMountPath
+            }
+          ]
         }
       ]
       scale: {
@@ -126,6 +186,13 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
         minReplicas: 0
         maxReplicas: 10
       }
+      volumes: [
+        {
+          name: 'dbvolume'
+          storageType: 'AzureFile'
+          storageName: storageMountName
+        }
+      ]
     }
   }
 }
@@ -133,3 +200,4 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = acr.properties.loginServer
 output AZURE_CONTAINER_REGISTRY_NAME string = acr.name
 output SERVICE_WEB_URI string = 'https://${containerApp.properties.configuration.ingress.fqdn}'
+output AZURE_STORAGE_ACCOUNT_NAME string = storageAccount.name
