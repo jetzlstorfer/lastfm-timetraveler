@@ -71,7 +71,6 @@
     #config-banner.show,
     #search-section.show,
     #top-tracks-section.show,
-    #on-this-day-section.show,
     #result.show {
       display: block;
     }
@@ -79,6 +78,10 @@
     #user-profile.show,
     #loading-screen.show {
       display: flex;
+    }
+
+    #on-this-day-section.show {
+      display: grid;
     }
 
     .glass-panel {
@@ -337,10 +340,11 @@
       font-size: 0.78rem;
     }
 
-    .otd-period + .otd-period {
-      margin-top: 1.4rem;
-      padding-top: 1.4rem;
-      border-top: 1px solid rgba(255, 255, 255, 0.06);
+    .otd-period {
+      padding: 1rem;
+      border-radius: 1.1rem;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(255, 255, 255, 0.02);
     }
 
     .otd-period-header {
@@ -745,50 +749,16 @@
   </div>
 
   <div class="relative mx-auto flex min-h-screen w-full max-w-7xl flex-col px-4 py-5 sm:px-6 lg:px-8 lg:py-8">
-    <header class="mb-6 grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(19rem,0.9fr)]">
+    <header class="mb-6">
       <section class="glass-panel rounded-[2rem] px-5 py-6 sm:px-7 sm:py-7 lg:px-8 lg:py-8">
-        <div class="mb-4 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-stone-300">
-          <span>Scrobble archaeology</span>
-          <span class="text-red-400">since 2002</span>
-        </div>
-        <div>
-          <p class="mb-3 text-3xl sm:text-4xl">🕰️🧑‍🚀</p>
-          <h1 class="text-4xl font-bold leading-none sm:text-5xl lg:text-6xl" style="background:linear-gradient(90deg,#d51007,#ff6b6b);-webkit-background-clip:text;-webkit-text-fill-color:transparent">Last.fm Time Traveler</h1>
-          <p class="mt-4 max-w-2xl text-base leading-7 text-stone-300 sm:text-lg">
-            Find the exact moment a track entered your listening history, then branch out into your current favorites and the songs you played on this day in past years.
+        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div class="flex items-center gap-4">
+            <span class="text-3xl sm:text-4xl">🕰️🧑‍🚀</span>
+            <h1 class="text-3xl font-bold leading-none sm:text-4xl lg:text-5xl" style="background:linear-gradient(90deg,#d51007,#ff6b6b);-webkit-background-clip:text;-webkit-text-fill-color:transparent">Last.fm Time Traveler</h1>
+          </div>
+          <p class="max-w-lg text-sm leading-6 text-stone-400">
+            Find the exact moment a track entered your listening history.
           </p>
-        </div>
-        <div class="mt-6 grid gap-3 grid-cols-1 sm:grid-cols-3">
-          <div class="rounded-2xl border border-white/8 bg-white/4 px-4 py-4">
-            <div class="text-xs uppercase tracking-[0.16em] text-stone-400">Autocomplete</div>
-            <div class="mt-2 text-lg font-semibold text-white">Fast track lookup</div>
-          </div>
-          <div class="rounded-2xl border border-white/8 bg-white/4 px-4 py-4">
-            <div class="text-xs uppercase tracking-[0.16em] text-stone-400">Time travel</div>
-            <div class="mt-2 text-lg font-semibold text-white">First scrobble date</div>
-          </div>
-          <div class="rounded-2xl border border-white/8 bg-white/4 px-4 py-4">
-            <div class="text-xs uppercase tracking-[0.16em] text-stone-400">Context</div>
-            <div class="mt-2 text-lg font-semibold text-white">Top tracks and anniversaries</div>
-          </div>
-        </div>
-      </section>
-
-      <section class="glass-panel rounded-[2rem] px-5 py-6 sm:px-7 sm:py-7">
-        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-400">How it works</div>
-        <div class="mt-3 space-y-4 text-sm leading-6 text-stone-300 sm:text-[0.96rem]">
-          <p>Connect a Last.fm profile, search for any song, and the app walks backward through your scrobble history to find the earliest match it can verify.</p>
-          <p>The desktop layout keeps the search flow on the left and your discovery panels on the right, so you can compare results without losing context.</p>
-        </div>
-        <div class="mt-6 grid gap-3 sm:grid-cols-2">
-          <div class="rounded-2xl border border-white/8 bg-white/4 p-4">
-            <div class="text-xs uppercase tracking-[0.16em] text-stone-400">Best for</div>
-            <div class="mt-2 text-base font-semibold text-white">Revisiting old obsessions</div>
-          </div>
-          <div class="rounded-2xl border border-white/8 bg-white/4 p-4">
-            <div class="text-xs uppercase tracking-[0.16em] text-stone-400">Good to know</div>
-            <div class="mt-2 text-base font-semibold text-white">Older sparse plays can still be limited by Last.fm history exposure</div>
-          </div>
         </div>
       </section>
     </header>
@@ -798,84 +768,73 @@
       <div class="banner-msg" id="banner-msg"></div>
     </div>
 
-    <main class="grid flex-1 gap-6 xl:grid-cols-[minmax(0,1.1fr)_minmax(24rem,0.9fr)] xl:items-start">
-      <section class="space-y-6">
-        <section class="glass-panel relative z-10 overflow-visible rounded-[2rem] px-5 py-6 sm:px-7 sm:py-7 lg:px-8">
-          <div class="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <div class="section-eyebrow text-xs font-semibold uppercase tracking-[0.16em]">Profile</div>
-              <h2 class="mt-2 text-2xl font-bold text-white">Connect your listening history</h2>
-            </div>
-            <p class="max-w-md text-sm leading-6 text-stone-400">Once connected, search stays pinned in the main column while the side panels fill out with context.</p>
+    <main class="flex-1 space-y-6">
+      <!-- Profile & Search -->
+      <section class="glass-panel relative z-10 overflow-visible rounded-[2rem] px-5 py-6 sm:px-7 sm:py-7 lg:px-8">
+        <div class="mt-2" id="username-section">
+          <div class="flex flex-col gap-3 sm:flex-row" id="username-bar">
+            <input id="username-input" class="field-input flex-1 px-4 py-3 text-base" type="text" placeholder="Enter your Last.fm username..." autocomplete="off" />
+            <button id="connect-btn" class="primary-button px-5 py-3 text-sm sm:min-w-36">Connect</button>
           </div>
 
-          <div class="mt-6" id="username-section">
-            <div class="flex flex-col gap-3 sm:flex-row" id="username-bar">
-              <input id="username-input" class="field-input flex-1 px-4 py-4 text-base" type="text" placeholder="Enter your Last.fm username..." autocomplete="off" />
-              <button id="connect-btn" class="primary-button px-5 py-4 text-sm sm:min-w-36">Connect</button>
+          <div class="user-profile show-animate" id="user-profile">
+            <img id="user-avatar" src="" alt="" />
+            <div class="min-w-0 flex-1">
+              <div class="user-name" id="user-display-name"></div>
+              <div class="user-stats" id="user-stats"></div>
             </div>
-
-            <div class="user-profile show-animate" id="user-profile">
-              <img id="user-avatar" src="" alt="" />
-              <div class="min-w-0 flex-1">
-                <div class="user-name" id="user-display-name"></div>
-                <div class="user-stats" id="user-stats"></div>
-              </div>
-              <button class="ghost-button px-4 py-2 text-sm font-medium" id="change-user-btn">Change</button>
-            </div>
+            <button class="ghost-button px-4 py-2 text-sm font-medium" id="change-user-btn">Change</button>
           </div>
-
-          <div id="search-section" class="mt-6 show-animate">
-            <div class="flex items-center justify-between gap-3">
-              <div>
-                <div class="section-eyebrow text-xs font-semibold uppercase tracking-[0.16em]">Track search</div>
-                <div class="mt-2 text-lg font-semibold text-white">Search a song and jump back to the first scrobble</div>
-              </div>
-            </div>
-            <div class="search-container relative mt-4">
-              <input id="search" class="field-input px-5 py-4 text-base sm:text-lg" type="text" placeholder="Start typing a song title..." autocomplete="off" />
-              <div id="ac-list" class="autocomplete-list"></div>
-            </div>
-          </div>
-        </section>
-
-        <div id="loading-screen" class="loading-screen show-animate">
-          <div class="starfield" id="starfield">
-            <div class="rocket-container">🚀</div>
-            <div class="year-counter" id="year-counter">2026</div>
-            <div class="year-label">Traveling to</div>
-            <div class="travel-kicker">Scanning your scrobble history for the earliest confirmed listen.</div>
-          </div>
-          <div class="fun-facts-bar">
-            <span class="fact-icon" id="fact-icon">🎵</span>
-            <span class="fact-text" id="fact-text">Searching through time...</span>
-          </div>
-          <div class="loading-status">Scanning your scrobble history<span class="loading-dots"><span></span><span></span><span></span></span></div>
         </div>
 
-        <div id="result" class="result-card"></div>
+        <div id="search-section" class="mt-5 show-animate">
+          <div class="search-container relative">
+            <input id="search" class="field-input px-5 py-3 text-base sm:text-lg" type="text" placeholder="Search for a song..." autocomplete="off" />
+            <div id="ac-list" class="autocomplete-list"></div>
+          </div>
+        </div>
       </section>
 
-      <aside class="space-y-6">
-        <section id="top-tracks-section" class="glass-panel rounded-[2rem] px-5 py-6 sm:px-7 sm:py-7 show-animate">
-          <div class="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <div class="section-eyebrow text-xs font-semibold uppercase tracking-[0.16em]">Current context</div>
-              <div class="section-title mt-2">🎵 Your top tracks</div>
-            </div>
-            <select class="period-select" id="period-select">
-              <option value="7day">Last 7 days</option>
-              <option value="1month" selected>Last month</option>
-              <option value="3month">Last 3 months</option>
-              <option value="6month">Last 6 months</option>
-              <option value="12month">Last year</option>
-              <option value="overall">All time</option>
-            </select>
-          </div>
-          <div class="top-tracks-grid" id="top-tracks-grid"></div>
-        </section>
+      <!-- Loading animation -->
+      <div id="loading-screen" class="loading-screen show-animate">
+        <div class="starfield" id="starfield">
+          <div class="rocket-container">🚀</div>
+          <div class="year-counter" id="year-counter">2026</div>
+          <div class="year-label">Traveling to</div>
+          <div class="travel-kicker">Scanning your scrobble history for the earliest confirmed listen.</div>
+        </div>
+        <div class="fun-facts-bar">
+          <span class="fact-icon" id="fact-icon">🎵</span>
+          <span class="fact-text" id="fact-text">Searching through time...</span>
+        </div>
+        <div class="loading-status">Scanning your scrobble history<span class="loading-dots"><span></span><span></span><span></span></span></div>
+      </div>
 
-        <section id="on-this-day-section" class="glass-panel rounded-[2rem] px-5 py-6 sm:px-7 sm:py-7 show-animate">
+      <!-- Search result -->
+      <div id="result" class="result-card"></div>
+
+      <!-- Top tracks (full width) -->
+      <section id="top-tracks-section" class="glass-panel rounded-[2rem] px-5 py-6 sm:px-7 sm:py-7 show-animate">
+        <div class="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div class="section-eyebrow text-xs font-semibold uppercase tracking-[0.16em]">Current context</div>
+            <div class="section-title mt-2">🎵 Your top tracks</div>
+          </div>
+          <select class="period-select" id="period-select">
+            <option value="7day">Last 7 days</option>
+            <option value="1month" selected>Last month</option>
+            <option value="3month">Last 3 months</option>
+            <option value="6month">Last 6 months</option>
+            <option value="12month">Last year</option>
+            <option value="overall">All time</option>
+          </select>
+        </div>
+        <div class="top-tracks-grid" id="top-tracks-grid"></div>
+      </section>
+
+      <!-- On This Day (2-column) -->
+      <div id="on-this-day-section" class="grid gap-6 md:grid-cols-2 show-animate">
+        <section class="glass-panel rounded-[2rem] px-5 py-6 sm:px-7 sm:py-7 md:col-span-2">
           <div class="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <div class="section-eyebrow text-xs font-semibold uppercase tracking-[0.16em]">Anniversary view</div>
@@ -885,9 +844,31 @@
               <span></span><span></span><span></span>
             </div>
           </div>
-          <div id="on-this-day-content"></div>
+          <div id="on-this-day-content" class="grid gap-5 md:grid-cols-2"></div>
         </section>
-      </aside>
+      </div>
+
+      <!-- How it works (shown before login, hidden after) -->
+      <section id="how-it-works" class="glass-panel rounded-[2rem] px-5 py-6 sm:px-7 sm:py-7">
+        <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-400">How it works</div>
+        <div class="mt-3 grid gap-6 md:grid-cols-3">
+          <div>
+            <div class="text-2xl mb-2">🔍</div>
+            <div class="text-sm font-semibold text-white mb-1">Search any song</div>
+            <p class="text-sm leading-6 text-stone-400">Type a track name and pick from autocomplete suggestions powered by Last.fm.</p>
+          </div>
+          <div>
+            <div class="text-2xl mb-2">⏪</div>
+            <div class="text-sm font-semibold text-white mb-1">Travel back in time</div>
+            <p class="text-sm leading-6 text-stone-400">The app scans your scrobble history to find the very first time you listened.</p>
+          </div>
+          <div>
+            <div class="text-2xl mb-2">📅</div>
+            <div class="text-sm font-semibold text-white mb-1">Rediscover memories</div>
+            <p class="text-sm leading-6 text-stone-400">See what you were playing on this day in past years and revisit old favorites.</p>
+          </div>
+        </div>
+      </section>
     </main>
 
     <footer class="pt-8 text-sm text-stone-500">
@@ -913,6 +894,7 @@
     const otdSection = document.getElementById('on-this-day-section');
     const otdContent = document.getElementById('on-this-day-content');
     const otdLoading = document.getElementById('otd-loading');
+    const howItWorks = document.getElementById('how-it-works');
 
     let debounceTimer = null;
     let activeIdx = -1;
@@ -1069,6 +1051,7 @@
       searchInput.value = '';
       usernameInput.value = '';
       usernameInput.focus();
+      howItWorks.style.display = '';
     });
 
     async function connectUser(username) {
@@ -1098,6 +1081,7 @@
         userProfile.classList.add('show');
         searchSection.classList.add('show');
         searchInput.focus();
+        howItWorks.style.display = 'none';
 
         loadTopTracks();
         loadOnThisDay();

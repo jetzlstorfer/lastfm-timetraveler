@@ -312,7 +312,7 @@ def user_top_tracks():
     if not username:
         return jsonify({"error": "username is required"}), 400
     try:
-        data = lastfm_get("user.getTopTracks", user=username, period=period, limit=6)
+        data = lastfm_get("user.getTopTracks", user=username, period=period, limit=10)
         tracks = data.get("toptracks", {}).get("track", [])
         results = []
         for t in tracks:
