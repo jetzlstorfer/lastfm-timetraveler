@@ -962,10 +962,10 @@
       let year = new Date().getFullYear();
       yearCounter.textContent = year;
       yearInterval = setInterval(() => {
-        year -= Math.floor(Math.random() * 3) + 1;
+        year = year - 1;
         if (year < 1950) year = new Date().getFullYear();
         yearCounter.textContent = year;
-      }, 600);
+      }, 1500);
 
       let lastIdx = -1;
       function showRandomFact() {
@@ -983,7 +983,7 @@
       }
 
       showRandomFact();
-      factInterval = setInterval(showRandomFact, 3500);
+      factInterval = setInterval(showRandomFact, 7000);
     }
 
     function stopLoadingAnimation() {
