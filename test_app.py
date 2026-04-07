@@ -35,11 +35,10 @@ def client():
 def _track_info_response(userplaycount, track="Songname", artist="Artistname",
                          album="Albumname", image_url="https://img.example/art.jpg"):
     """Fake response for track.getInfo."""
-    return {
+    response = {
         "track": {
             "name": track,
             "artist": {"name": artist},
-            "userplaycount": str(userplaycount),
             "userloved": "0",
             "album": {
                 "title": album,
@@ -50,6 +49,11 @@ def _track_info_response(userplaycount, track="Songname", artist="Artistname",
             },
         }
     }
+
+    if userplaycount is not None:
+        response["track"]["userplaycount"] = str(userplaycount)
+    return response
+    return response
 
 
 def _weekly_chart_list(weeks):
@@ -229,7 +233,7 @@ class TestFirstListen:
         assert data["album"] == "TestAlbum"
         assert data["total_scrobbles"] == 42
         assert data["date"] == "02 Jan 2007, 20:30"
-        assert data["timestamp"] == ""
+        assert data["timestamp"] == "1167766200"
         assert data["date_unavailable"] is False
         assert data["image"] == "https://img.example/cover.jpg"
 
@@ -253,7 +257,7 @@ class TestFirstListen:
         assert data["date"] == ""
         assert data["timestamp"] == ""
         assert data["date_unavailable"] is True
-        assert "public track history page" in data["date_unavailable_reason"].lower()
+        assert "exact first-listen timestamp" in data["date_unavailable_reason"].lower()
 
     @patch.object(app_module, "public_library_first_listen_date")
     @patch.object(app_module, "lastfm_get")
@@ -268,7 +272,7 @@ class TestFirstListen:
         assert data["date"] == ""
         assert data["timestamp"] == ""
         assert data["date_unavailable"] is True
-        assert "public track history page" in data["date_unavailable_reason"].lower()
+        assert "exact first-listen timestamp" in data["date_unavailable_reason"].lower()
 
     @patch.object(app_module, "lastfm_get")
     def test_track_getinfo_http_error_returns_502(self, mock_get, client):
@@ -288,6 +292,7 @@ class TestFirstListen:
 
         assert data["found"] is True
         assert data["date"] == "03 Jan 2007, 10:00"
+        assert data["timestamp"] == "1167814800"
         assert data["total_scrobbles"] == 1
 
     @patch.object(app_module, "public_library_first_listen_date")
@@ -299,6 +304,101 @@ class TestFirstListen:
         resp = client.get("/api/first-listen?track=My+Song&artist=The+Band&username=testuser")
         data = resp.get_json()
         assert data["found"] is True
+        assert data["timestamp"] == "1168858800"
+
+    @patch.object(app_module, "public_library_first_listen_date", return_value=None)
+    @patch.object(app_module, "lastfm_get")
+    def test_old_track_falls_back_to_recent_track_history(self, mock_get, mock_public_date, client):
+        """Older tracks should still resolve by scanning recent-track pages from oldest to newest."""
+
+        def fake_lastfm(method, **params):
+            if method == "track.getInfo":
+                return _track_info_response(
+                    userplaycount=111,
+                    track="My First Trumpet",
+                    artist="Autonarkose",
+                    album="My First Trumpet",
+                )
+            if method == "user.getRecentTracks":
+                page = int(params["page"])
+                if page == 1:
+                    return _recent_tracks_response(
+                        [("Recent Song", "Elsewhere", "01 Jan 2025, 18:00", "1735754400")],
+                        page=1,
+                        total_pages=3,
+                    )
+                if page == 3:
+                    return _recent_tracks_response(
+                        [
+                            ("My First Trumpet", "Autonarkose", "05 Mar 2008, 21:17", "1204751820"),
+                            ("Earlier Other Track", "Someone", "04 Mar 2008, 10:00", "1204624800"),
+                        ],
+                        page=3,
+                        total_pages=3,
+                    )
+                return _recent_tracks_response(
+                    [("Middle Song", "Elsewhere", "01 Jan 2016, 12:00", "1451649600")],
+                    page=2,
+                    total_pages=3,
+                )
+            raise AssertionError(f"Unexpected method: {method}")
+
+        mock_get.side_effect = fake_lastfm
+
+        resp = client.get(
+            "/api/first-listen?track=My+First+Trumpet&artist=Autonarkose&username=testuser"
+        )
+        data = resp.get_json()
+
+        assert data["found"] is True
+        assert data["date"] == "05 Mar 2008, 21:17"
+        assert data["timestamp"] == "1204751820"
+        assert data["date_unavailable"] is False
+
+    @patch.object(app_module, "public_library_first_listen_date", return_value=None)
+    @patch.object(app_module, "lastfm_get")
+    def test_missing_userplaycount_uses_recent_history_summary(self, mock_get, mock_public_date, client):
+        """If Last.fm omits userplaycount, derive both first listen and playcount from recent-track history."""
+
+        def fake_lastfm(method, **params):
+            if method == "track.getInfo":
+                return _track_info_response(
+                    userplaycount=None,
+                    track="Missing Count Song",
+                    artist="Hidden Artist",
+                )
+            if method == "user.getRecentTracks":
+                page = int(params["page"])
+                if page == 1:
+                    return _recent_tracks_response(
+                        [
+                            ("Missing Count Song", "Hidden Artist", "02 Jan 2012, 08:00", "1325491200"),
+                            ("Something Else", "Someone", "03 Jan 2012, 08:00", "1325577600"),
+                        ],
+                        page=1,
+                        total_pages=2,
+                    )
+                return _recent_tracks_response(
+                    [
+                        ("Missing Count Song", "Hidden Artist", "01 Jan 2012, 08:00", "1325404800"),
+                        ("Older Other Song", "Someone", "31 Dec 2011, 08:00", "1325318400"),
+                    ],
+                    page=2,
+                    total_pages=2,
+                )
+            raise AssertionError(f"Unexpected method: {method}")
+
+        mock_get.side_effect = fake_lastfm
+
+        resp = client.get(
+            "/api/first-listen?track=Missing+Count+Song&artist=Hidden+Artist&username=testuser"
+        )
+        data = resp.get_json()
+
+        assert data["found"] is True
+        assert data["date"] == "01 Jan 2012, 08:00"
+        assert data["timestamp"] == "1325404800"
+        assert data["total_scrobbles"] == 2
 
 
 # ---------------------------------------------------------------------------

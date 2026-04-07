@@ -20,6 +20,7 @@ with app.app_context():
 LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
 LASTFM_BASE = "https://ws.audioscrobbler.com/2.0/"
 LIBRARY_PAGE_SIZE = 50
+RECENT_TRACKS_PAGE_SIZE = 200
 TRACK_PAGE_DATE_RE = re.compile(
     r'<span title="(?:[A-Z][a-z]+ )?([0-9]{1,2} [A-Z][a-z]{2} [0-9]{4}, [0-9]{1,2}:[0-9]{2}(?:am|pm))">'
 )
@@ -55,6 +56,147 @@ def lastfm_get(method: str, **params):
                 continue
             raise
     raise last_exc
+
+
+def normalize_lastfm_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value or "").strip().casefold()
+
+
+def extract_artist_name(value) -> str:
+    if isinstance(value, dict):
+        return value.get("#text") or value.get("name", "")
+    return str(value or "")
+
+
+def scrobble_matches_track(scrobble: dict, track: str, artist: str) -> bool:
+    return (
+        normalize_lastfm_text(scrobble.get("name", "")) == normalize_lastfm_text(track)
+        and normalize_lastfm_text(extract_artist_name(scrobble.get("artist")))
+        == normalize_lastfm_text(artist)
+    )
+
+
+def matching_scrobbles_on_page(scrobbles, track: str, artist: str) -> list[dict]:
+    if isinstance(scrobbles, dict):
+        scrobbles = [scrobbles]
+
+    matches = []
+    for scrobble in scrobbles:
+        if scrobble.get("@attr", {}).get("nowplaying"):
+            continue
+        if not scrobble_matches_track(scrobble, track, artist):
+            continue
+
+        date_info = scrobble.get("date") or {}
+        timestamp = str(date_info.get("uts", "") or "")
+        if not timestamp:
+            continue
+
+        date_text = date_info.get("#text", "")
+        if not date_text:
+            date_text = datetime.fromtimestamp(
+                int(timestamp), tz=timezone.utc
+            ).strftime("%d %b %Y, %H:%M UTC")
+
+        matches.append(
+            {
+                "track": scrobble.get("name", "") or track,
+                "artist": extract_artist_name(scrobble.get("artist")) or artist,
+                "date": date_text,
+                "timestamp": timestamp,
+            }
+        )
+
+    matches.sort(key=lambda item: int(item["timestamp"]))
+    return matches
+
+
+def earliest_scrobble_on_page(scrobbles, track: str, artist: str) -> tuple[str, str] | None:
+    matches = matching_scrobbles_on_page(scrobbles, track, artist)
+    if not matches:
+        return None
+
+    return matches[0]["date"], matches[0]["timestamp"]
+
+
+def recent_tracks_history_summary(username: str, track: str, artist: str) -> dict | None:
+    """Scan recent-track history and return the first play plus the total match count."""
+
+    first_page = lastfm_get(
+        "user.getRecentTracks",
+        user=username,
+        limit=RECENT_TRACKS_PAGE_SIZE,
+        page=1,
+    )
+    recenttracks = first_page.get("recenttracks", {})
+    total_pages = int(recenttracks.get("@attr", {}).get("totalPages", 1) or 1)
+
+    first_match = None
+    total_matches = 0
+
+    for page in range(total_pages, 0, -1):
+        data = first_page
+        if page != 1:
+            data = lastfm_get(
+                "user.getRecentTracks",
+                user=username,
+                limit=RECENT_TRACKS_PAGE_SIZE,
+                page=page,
+            )
+
+        page_matches = matching_scrobbles_on_page(
+            data.get("recenttracks", {}).get("track", []), track, artist
+        )
+        if not page_matches:
+            continue
+
+        if first_match is None:
+            first_match = page_matches[0]
+        total_matches += len(page_matches)
+
+    if not first_match:
+        return None
+
+    return {
+        "track": first_match["track"],
+        "artist": first_match["artist"],
+        "date": first_match["date"],
+        "timestamp": first_match["timestamp"],
+        "total_scrobbles": total_matches,
+    }
+
+
+def recent_tracks_first_listen(
+    username: str, track: str, artist: str
+) -> tuple[str, str] | tuple[None, None]:
+    """Find the first play by scanning paginated recent tracks from oldest to newest."""
+
+    first_page = lastfm_get(
+        "user.getRecentTracks",
+        user=username,
+        limit=RECENT_TRACKS_PAGE_SIZE,
+        page=1,
+    )
+    recenttracks = first_page.get("recenttracks", {})
+    total_pages = int(recenttracks.get("@attr", {}).get("totalPages", 1) or 1)
+
+    for page in range(total_pages, 0, -1):
+        data = first_page
+        if page != 1:
+            data = lastfm_get(
+                "user.getRecentTracks",
+                user=username,
+                limit=RECENT_TRACKS_PAGE_SIZE,
+                page=page,
+            )
+
+        match = earliest_scrobble_on_page(
+            data.get("recenttracks", {}).get("track", []), track, artist
+        )
+        if match:
+            return match
+
+    return None, None
 
 
 def public_library_first_listen_date(
@@ -100,9 +242,14 @@ def public_library_first_listen_date(
 
 def lastfm_library_date_to_timestamp(date_text: str) -> str:
     """Convert a Last.fm library page date to a unix timestamp string."""
-    dt = datetime.strptime(date_text, "%d %b %Y, %I:%M%p")
-    dt = dt.replace(tzinfo=ZoneInfo("Europe/Vienna"))
-    return str(int(dt.timestamp()))
+    for fmt in ("%d %b %Y, %I:%M%p", "%d %b %Y, %H:%M"):
+        try:
+            dt = datetime.strptime(date_text, fmt)
+            dt = dt.replace(tzinfo=ZoneInfo("Europe/Vienna"))
+            return str(int(dt.timestamp()))
+        except ValueError:
+            continue
+    raise ValueError(f"Unsupported Last.fm date format: {date_text}")
 
 
 @app.route("/")
@@ -338,7 +485,18 @@ def first_listen():
         return jsonify({"error": "Last.fm API error"}), 502
 
     track_info = info.get("track", {})
-    total = int(track_info.get("userplaycount", 0))
+    history_summary = None
+    userplaycount = track_info.get("userplaycount")
+    total = int(userplaycount or 0)
+
+    if userplaycount in (None, ""):
+        try:
+            history_summary = recent_tracks_history_summary(username, track, artist)
+        except requests.RequestException:
+            history_summary = None
+
+        if history_summary:
+            total = history_summary["total_scrobbles"]
 
     if total == 0:
         return jsonify(
@@ -362,28 +520,43 @@ def first_listen():
     # Canonical names from Last.fm
     canonical_track = track_info.get("name", track)
     canonical_artist = track_info.get("artist", {}).get("name", artist)
-    exact_date = None
-    exact_ts = ""
+    exact_date = history_summary["date"] if history_summary else None
+    exact_ts = history_summary["timestamp"] if history_summary else ""
     date_unavailable_reason = ""
 
-    try:
-        exact_date = public_library_first_listen_date(
-            username, canonical_artist, canonical_track, total
-        )
-        if exact_date:
-            exact_ts = lastfm_library_date_to_timestamp(exact_date)
-    except requests.RequestException:
-        date_unavailable_reason = (
-            "The public Last.fm track page could not be fetched, so the exact first-listen timestamp could not be determined."
-        )
-    except ValueError:
-        date_unavailable_reason = (
-            "The public Last.fm track page exposed a date, but it could not be converted into a timestamp."
-        )
+    if history_summary:
+        canonical_track = history_summary["track"] or canonical_track
+        canonical_artist = history_summary["artist"] or canonical_artist
+
+    if not exact_date:
+        try:
+            exact_date = public_library_first_listen_date(
+                username, canonical_artist, canonical_track, total
+            )
+            if exact_date:
+                exact_ts = lastfm_library_date_to_timestamp(exact_date)
+        except requests.RequestException:
+            date_unavailable_reason = (
+                "The public Last.fm track page could not be fetched, so the exact first-listen timestamp could not be determined."
+            )
+        except ValueError:
+            date_unavailable_reason = (
+                "The public Last.fm track page exposed a date, but it could not be converted into a timestamp."
+            )
+
+    if not exact_date:
+        try:
+            exact_date, exact_ts = recent_tracks_first_listen(
+                username, canonical_track, canonical_artist
+            )
+        except requests.RequestException:
+            date_unavailable_reason = (
+                "The accessible Last.fm listening history could not be fetched, so the exact first-listen timestamp could not be determined."
+            )
 
     if not exact_date:
         date_unavailable_reason = date_unavailable_reason or (
-            "Last.fm reports a play for this track, but the public track history page does not expose an exact first-listen timestamp."
+            "Last.fm reports plays for this track, but neither the public track page nor the accessible recent-track history exposed an exact first-listen timestamp."
         )
 
     date_unavailable = not bool(exact_date)
