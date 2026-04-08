@@ -1,4 +1,4 @@
-.PHONY: install run dev clean
+.PHONY: install run dev test clean
 
 install:
 	pip install -r requirements.txt
@@ -8,6 +8,9 @@ run:
 
 dev:
 	flask run --host=0.0.0.0 --port=5000 --debug
+
+test:
+	pytest
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true

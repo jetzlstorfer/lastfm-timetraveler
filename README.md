@@ -30,6 +30,18 @@ Type a song title, pick from the autocomplete suggestions, and discover when you
 
 Open this repo in VS Code with the Dev Containers extension — it will auto-create the venv and install dependencies.
 
+### Running tests
+
+```bash
+make test
+```
+
+or directly:
+
+```bash
+pytest
+```
+
 ## Deploy to Azure
 
 This project includes everything needed to deploy to **Azure Container Apps** using the [Azure Developer CLI (azd)](https://aka.ms/azd).
@@ -68,7 +80,7 @@ You will be prompted for:
 
 ### CI/CD with GitHub Actions
 
-The `.github/workflows/azure-dev.yml` workflow runs `azd provision` and `azd deploy` automatically on every push to `main`.
+The `.github/workflows/azure-aca-deploy.yml` workflow runs `azd provision` and `azd deploy` automatically on every push to `main`.
 
 **Required GitHub repository variables** (`Settings → Secrets and variables → Actions`):
 
@@ -83,12 +95,14 @@ The `.github/workflows/azure-dev.yml` workflow runs `azd provision` and `azd dep
 
 To set up federated credentials (OIDC) for the service principal, follow the [azd GitHub Actions guide](https://learn.microsoft.com/azure/developer/azure-developer-cli/configure-devops-pipeline).
 
+[Dependabot](.github/dependabot.yml) is configured to open weekly PRs for pip, Docker, and GitHub Actions dependency updates.
+
 ## How it works
 
 - **Autocomplete** uses Last.fm's `track.search` API
-- **First listen** uses a binary search over `user.getWeeklyTrackChart` to locate the earliest week, then `user.getRecentTracks` to find the exact scrobble date
+- **First listen** fetches `track.getInfo` for the play count, then scrapes the user's public library page for the oldest visible scrobble date. If the public page is unavailable (private profile, login wall, etc.) it falls back to scanning `user.getRecentTracks` pages backward from oldest to newest
 - **Caching** — confirmed lookups are written to Azure Cosmos DB in Azure, or to a local SQLite file by default during development
-- **History** — the `/api/history` endpoint returns cached lookups for the configured user, including partial results whose exact first-listen date could not be resolved yet
+- **History** — the `/api/history` endpoint returns cached lookups for a given user, including partial results whose exact first-listen date could not be resolved yet
 - Built with **Flask** (backend) and vanilla **HTML/CSS/JS** (frontend)
 
 ### Database
@@ -96,7 +110,7 @@ To set up federated credentials (OIDC) for the service principal, follow the [az
 The app supports two persistence modes:
 
 - **Default local mode** — uses a SQLite file (`timetraveler.db` by default, overridable with `DB_PATH`)
-- **Cosmos mode** — enabled when `COSMOS_CONNECTION_STRING` is set; the app then uses the configured Cosmos database and container instead of SQLite
+- **Cosmos mode** — enabled when `COSMOS_CONNECTION_STRING` is set (or both `COSMOS_ENDPOINT` and `COSMOS_KEY`); the app then uses the configured Cosmos database and container instead of SQLite
 
 To run the Cosmos path locally, start the Azure Cosmos DB emulator in Docker and point the app at it:
 
@@ -114,5 +128,13 @@ The emulator exposes the database endpoint on `http://localhost:8081` and the lo
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/history` | All cached first-listen results for the configured user |
-| `GET /api/history?username=<user>` | Results for a specific username |
+| `GET /api/status` | Health check — verifies the API key is configured |
+| `GET /api/ready` | Readiness probe — tests API key and database connectivity |
+| `GET /api/user/validate?username=` | Validates a Last.fm username and returns profile info |
+| `GET /api/user/top-tracks?username=&period=` | Top tracks for a user (`7day`, `1month`, `3month`, `6month`, `12month`, `overall`) |
+| `GET /api/on-this-day?username=` | What the user listened to on this day 1, 2, 3, 5, and 10 years ago |
+| `GET /api/search?q=` | Track autocomplete search (minimum 2 characters) |
+| `GET /api/first-listen?track=&artist=&username=` | Find the first scrobble (returns `202` with a `lookup_id` for async polling) |
+| `GET /api/lookup-progress?lookup_id=` | Poll progress of an async first-listen lookup |
+| `GET /api/artist-image?artist=` | Fetch an image URL for an artist |
+| `GET /api/history?username=` | All cached first-listen results for the given username |
