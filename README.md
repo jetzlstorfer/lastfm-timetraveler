@@ -48,7 +48,7 @@ azd up
 
 This single command will:
 1. Build and push the Docker image to **Azure Container Registry**
-2. Provision all infrastructure (**Container Apps Environment**, **Container App**, **Log Analytics**)
+2. Provision all infrastructure (**Container Apps Environment**, **Container App**, **Log Analytics**, **Azure Cosmos DB for NoSQL**)
 3. Deploy the application to **Azure Container Apps**
 
 The resource group, Container App, Container Apps environment, and Log Analytics workspace names are derived from `AZURE_ENV_NAME`. The Azure Container Registry name also uses `AZURE_ENV_NAME`, with a short stable hash suffix because registry names must be globally unique and alphanumeric.
@@ -87,13 +87,30 @@ To set up federated credentials (OIDC) for the service principal, follow the [az
 
 - **Autocomplete** uses Last.fm's `track.search` API
 - **First listen** uses a binary search over `user.getWeeklyTrackChart` to locate the earliest week, then `user.getRecentTracks` to find the exact scrobble date
-- **Caching** — confirmed lookups are written to the local SQLite database (`timetraveler.db`) as soon as the app knows the track exists, then updated again if the exact first-listen timestamp is found
+- **Caching** — confirmed lookups are written to Azure Cosmos DB in Azure, or to a local SQLite file by default during development
 - **History** — the `/api/history` endpoint returns cached lookups for the configured user, including partial results whose exact first-listen date could not be resolved yet
 - Built with **Flask** (backend) and vanilla **HTML/CSS/JS** (frontend)
 
 ### Database
 
-The app creates `timetraveler.db` automatically on first run. The path can be overridden with the `DB_PATH` environment variable (useful for testing or custom deployments).
+The app supports two persistence modes:
+
+- **Default local mode** — uses a SQLite file (`timetraveler.db` by default, overridable with `DB_PATH`)
+- **Cosmos mode** — enabled when `COSMOS_CONNECTION_STRING` is set; the app then uses the configured Cosmos database and container instead of SQLite
+
+To run the Cosmos path locally, start the Azure Cosmos DB emulator in Docker and point the app at it:
+
+```bash
+docker pull mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-preview
+docker run -d -p 8081:8081 -p 1234:1234 mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-preview
+
+export COSMOS_CONNECTION_STRING='AccountEndpoint=http://localhost:8081/;AccountKey=<emulator-key>;'
+export COSMOS_DATABASE_NAME='lastfm-timetraveler'
+export COSMOS_CONTAINER_NAME='searches'
+python app.py
+```
+
+The emulator exposes the database endpoint on `http://localhost:8081` and the local data explorer on `http://localhost:1234`.
 
 | Endpoint | Description |
 |---|---|

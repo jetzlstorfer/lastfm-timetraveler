@@ -21,42 +21,9 @@ var acrName = 'acr${compactEnvironmentName}${take(resourceToken, 6)}'
 var logAnalyticsName = take('log-${normalizedEnvironmentName}', 63)
 var containerAppsEnvironmentName = take('cae-${normalizedEnvironmentName}', 32)
 var containerAppName = take('ca-${normalizedEnvironmentName}', 32)
-var storageAccountName = take('st${compactEnvironmentName}${take(resourceToken, 6)}', 24)
-var fileShareName = 'timetravelerdb'
-var storageMountName = 'dbstorage'
-var dbMountPath = '/data'
-var dbPath = '${dbMountPath}/timetraveler.db'
-
-// ---------------------------------------------------------------------------
-// Storage Account + File Share (persistent SQLite database volume)
-// ---------------------------------------------------------------------------
-resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
-  name: storageAccountName
-  location: location
-  tags: tags
-  kind: 'StorageV2'
-  sku: {
-    name: 'Standard_LRS'
-  }
-  properties: {
-    minimumTlsVersion: 'TLS1_2'
-    allowBlobPublicAccess: false
-    supportsHttpsTrafficOnly: true
-  }
-}
-
-resource fileService 'Microsoft.Storage/storageAccounts/fileServices@2023-01-01' = {
-  name: 'default'
-  parent: storageAccount
-}
-
-resource fileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-01-01' = {
-  name: fileShareName
-  parent: fileService
-  properties: {
-    shareQuota: 1
-  }
-}
+var cosmosAccountName = take('cosmos-${normalizedEnvironmentName}-${take(resourceToken, 6)}', 50)
+var cosmosDatabaseName = 'lastfm-timetraveler'
+var cosmosContainerName = 'searches'
 
 // ---------------------------------------------------------------------------
 // Log Analytics Workspace (required by Container Apps Environment)
@@ -89,6 +56,72 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-01-01-preview' = {
 }
 
 // ---------------------------------------------------------------------------
+// Azure Cosmos DB for NoSQL (serverless cache store)
+// ---------------------------------------------------------------------------
+resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2024-11-15' = {
+  name: cosmosAccountName
+  location: location
+  kind: 'GlobalDocumentDB'
+  tags: tags
+  properties: {
+    databaseAccountOfferType: 'Standard'
+    locations: [
+      {
+        locationName: location
+        failoverPriority: 0
+        isZoneRedundant: false
+      }
+    ]
+    capabilities: [
+      {
+        name: 'EnableServerless'
+      }
+    ]
+    consistencyPolicy: {
+      defaultConsistencyLevel: 'Session'
+    }
+    backupPolicy: {
+      type: 'Periodic'
+      periodicModeProperties: {
+        backupIntervalInMinutes: 240
+        backupRetentionIntervalInHours: 8
+        backupStorageRedundancy: 'Local'
+      }
+    }
+    publicNetworkAccess: 'Enabled'
+    disableLocalAuth: false
+    minimalTlsVersion: 'Tls12'
+  }
+}
+
+resource cosmosDatabase 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2024-11-15' = {
+  name: cosmosDatabaseName
+  parent: cosmosAccount
+  properties: {
+    resource: {
+      id: cosmosDatabaseName
+    }
+  }
+}
+
+resource cosmosContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-11-15' = {
+  name: cosmosContainerName
+  parent: cosmosDatabase
+  properties: {
+    resource: {
+      id: cosmosContainerName
+      partitionKey: {
+        paths: [
+          '/username_normalized'
+        ]
+        kind: 'Hash'
+        version: 2
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Container Apps Environment
 // ---------------------------------------------------------------------------
 resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2023-05-01' = {
@@ -106,20 +139,6 @@ resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2023-05-01'
   }
 }
 
-// Register the Azure Files share as a named storage on the environment
-resource envStorage 'Microsoft.App/managedEnvironments/storages@2023-05-01' = {
-  name: storageMountName
-  parent: containerAppsEnvironment
-  properties: {
-    azureFile: {
-      accountName: storageAccount.name
-      accountKey: storageAccount.listKeys().keys[0].value
-      shareName: fileShareName
-      accessMode: 'ReadWrite'
-    }
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Container App
 // ---------------------------------------------------------------------------
@@ -128,7 +147,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
   location: location
   tags: union(tags, { 'azd-service-name': 'web' })
   dependsOn: [
-    envStorage
+    cosmosContainer
   ]
   properties: {
     managedEnvironmentId: containerAppsEnvironment.id
@@ -154,6 +173,10 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           name: 'lastfm-api-key'
           value: lastfmApiKey
         }
+        {
+          name: 'cosmos-connection-string'
+          value: cosmosAccount.listConnectionStrings().connectionStrings[0].connectionString
+        }
       ]
     }
     template: {
@@ -168,18 +191,55 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
               secretRef: 'lastfm-api-key'
             }
             {
-              name: 'DB_PATH'
-              value: dbPath
+              name: 'COSMOS_CONNECTION_STRING'
+              secretRef: 'cosmos-connection-string'
+            }
+            {
+              name: 'COSMOS_DATABASE_NAME'
+              value: cosmosDatabaseName
+            }
+            {
+              name: 'COSMOS_CONTAINER_NAME'
+              value: cosmosContainerName
             }
           ]
           resources: {
             cpu: json('0.5')
             memory: '1Gi'
           }
-          volumeMounts: [
+          probes: [
             {
-              volumeName: 'dbvolume'
-              mountPath: dbMountPath
+              type: 'Startup'
+              httpGet: {
+                path: '/api/ready'
+                port: 5000
+              }
+              initialDelaySeconds: 10
+              periodSeconds: 5
+              timeoutSeconds: 10
+              failureThreshold: 24
+            }
+            {
+              type: 'Readiness'
+              httpGet: {
+                path: '/api/ready'
+                port: 5000
+              }
+              initialDelaySeconds: 10
+              periodSeconds: 10
+              timeoutSeconds: 10
+              failureThreshold: 3
+            }
+            {
+              type: 'Liveness'
+              httpGet: {
+                path: '/api/status'
+                port: 5000
+              }
+              initialDelaySeconds: 30
+              periodSeconds: 30
+              timeoutSeconds: 3
+              failureThreshold: 3
             }
           ]
         }
@@ -189,13 +249,6 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
         minReplicas: 0
         maxReplicas: 10
       }
-      volumes: [
-        {
-          name: 'dbvolume'
-          storageType: 'AzureFile'
-          storageName: storageMountName
-        }
-      ]
     }
   }
 }
@@ -203,4 +256,5 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = acr.properties.loginServer
 output AZURE_CONTAINER_REGISTRY_NAME string = acr.name
 output SERVICE_WEB_URI string = 'https://${containerApp.properties.configuration.ingress.fqdn}'
-output AZURE_STORAGE_ACCOUNT_NAME string = storageAccount.name
+output AZURE_COSMOS_DB_ACCOUNT_NAME string = cosmosAccount.name
+output AZURE_COSMOS_DB_ENDPOINT string = cosmosAccount.properties.documentEndpoint

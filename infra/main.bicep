@@ -37,4 +37,5 @@ module resources 'resources.bicep' = {
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = resources.outputs.AZURE_CONTAINER_REGISTRY_ENDPOINT
 output AZURE_CONTAINER_REGISTRY_NAME string = resources.outputs.AZURE_CONTAINER_REGISTRY_NAME
 output SERVICE_WEB_URI string = resources.outputs.SERVICE_WEB_URI
-output AZURE_STORAGE_ACCOUNT_NAME string = resources.outputs.AZURE_STORAGE_ACCOUNT_NAME
+output AZURE_COSMOS_DB_ACCOUNT_NAME string = resources.outputs.AZURE_COSMOS_DB_ACCOUNT_NAME
+output AZURE_COSMOS_DB_ENDPOINT string = resources.outputs.AZURE_COSMOS_DB_ENDPOINT
