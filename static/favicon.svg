@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f0c29"/>
+      <stop offset="50%" stop-color="#302b63"/>
+      <stop offset="100%" stop-color="#24243e"/>
+    </linearGradient>
+    <linearGradient id="visor" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#d51007"/>
+      <stop offset="100%" stop-color="#ff6b6b"/>
+    </linearGradient>
+    <radialGradient id="helmet-sheen" cx="0.35" cy="0.3" r="0.65">
+      <stop offset="0%" stop-color="#fff" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="1.2" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background: deep space -->
+  <rect width="64" height="64" rx="15" fill="url(#bg)"/>
+
+  <!-- Stars -->
+  <circle cx="8" cy="10" r="0.8" fill="#fff" opacity="0.7"/>
+  <circle cx="52" cy="8" r="1" fill="#fff" opacity="0.8"/>
+  <circle cx="56" cy="52" r="0.7" fill="#fff" opacity="0.5"/>
+  <circle cx="10" cy="48" r="0.9" fill="#fff" opacity="0.6"/>
+  <circle cx="28" cy="6" r="0.6" fill="#fff" opacity="0.4"/>
+  <circle cx="48" cy="30" r="0.5" fill="#fff" opacity="0.5"/>
+  <circle cx="6" cy="30" r="0.6" fill="#fff" opacity="0.45"/>
+  <circle cx="38" cy="58" r="0.7" fill="#fff" opacity="0.35"/>
+
+  <!-- Astronaut body -->
+  <rect x="24" y="40" width="16" height="14" rx="4" fill="#e0ddd8" stroke="#ccc9c2" stroke-width="0.5"/>
+  <!-- Backpack -->
+  <rect x="21" y="42" width="4" height="10" rx="2" fill="#c8c4bc" stroke="#b0ada5" stroke-width="0.4"/>
+  <!-- Chest panel -->
+  <rect x="28" y="43" width="8" height="5" rx="1.2" fill="#b0ada5"/>
+  <circle cx="30.5" cy="45" r="0.8" fill="#d51007"/>
+  <circle cx="33.5" cy="45" r="0.8" fill="#4ade80"/>
+  <rect x="29" y="46.5" width="6" height="0.8" rx="0.4" fill="#78716c"/>
+
+  <!-- Arms -->
+  <rect x="17" y="42" width="7" height="4" rx="2" fill="#e0ddd8" stroke="#ccc9c2" stroke-width="0.4" transform="rotate(-15 20 44)"/>
+  <rect x="40" y="42" width="7" height="4" rx="2" fill="#e0ddd8" stroke="#ccc9c2" stroke-width="0.4" transform="rotate(15 44 44)"/>
+  <!-- Gloves -->
+  <circle cx="17.5" cy="43.5" r="2.2" fill="#ccc9c2"/>
+  <circle cx="47" cy="43.5" r="2.2" fill="#ccc9c2"/>
+
+  <!-- Legs -->
+  <rect x="26" y="53" width="5" height="6" rx="2" fill="#e0ddd8" stroke="#ccc9c2" stroke-width="0.4"/>
+  <rect x="33" y="53" width="5" height="6" rx="2" fill="#e0ddd8" stroke="#ccc9c2" stroke-width="0.4"/>
+  <!-- Boots -->
+  <rect x="25" y="57" width="7" height="3.5" rx="1.5" fill="#ccc9c2" stroke="#b0ada5" stroke-width="0.4"/>
+  <rect x="32" y="57" width="7" height="3.5" rx="1.5" fill="#ccc9c2" stroke="#b0ada5" stroke-width="0.4"/>
+
+  <!-- Helmet -->
+  <circle cx="32" cy="30" r="14" fill="#e0ddd8" stroke="#ccc9c2" stroke-width="0.8"/>
+  <circle cx="32" cy="30" r="14" fill="url(#helmet-sheen)"/>
+
+  <!-- Visor (ember gradient) -->
+  <ellipse cx="32" cy="30" rx="10.5" ry="10" fill="url(#visor)" filter="url(#glow)"/>
+  <!-- Visor reflection -->
+  <ellipse cx="28" cy="26" rx="4" ry="2.5" fill="#fff" opacity="0.18" transform="rotate(-20 28 26)"/>
+  <ellipse cx="36" cy="33" rx="2.5" ry="1.5" fill="#fff" opacity="0.08"/>
+</svg>
