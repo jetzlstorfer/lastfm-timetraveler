@@ -2,7 +2,7 @@ import os
 import re
 import time
 import logging
-from threading import Lock
+from threading import Lock, Thread
 from math import ceil
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
@@ -767,97 +767,41 @@ def lookup_progress():
     return jsonify({"found": True, **payload})
 
 
-@app.route("/api/first-listen")
-def first_listen():
-    """Find the very first scrobble of a track for the given user."""
+def _run_first_listen_lookup(
+    username: str, track: str, artist: str, lookup_id: str, flask_app
+) -> None:
+    """Background worker for the first-listen lookup.
+
+    Runs all the slow Last.fm page scanning and stores the final result in
+    LOOKUP_PROGRESS so the client can retrieve it via ``/api/lookup-progress``.
+    """
     started_at = time.perf_counter()
 
     def elapsed_ms() -> int:
         return int((time.perf_counter() - started_at) * 1000)
 
-    lookup_id = request.args.get("lookup_id", "").strip() or None
-    track = request.args.get("track", "").strip()
-    artist = request.args.get("artist", "").strip()
-    username = request.args.get("username", "").strip()
-    if track and artist and username:
-        app.logger.info("lookup request started %s", lookup_context(username, artist, track))
-        update_lookup_progress(
-            lookup_id,
-            username=username,
-            artist=artist,
-            track=track,
-            stage="request-started",
-            status="Checking Last.fm track metadata",
-            detail="Starting lookup and checking basic track metadata.",
-            pages_checked=None,
-            pages_total=None,
-        )
-    if not track or not artist or not username:
-        finish_lookup_progress(
-            lookup_id,
-            stage="request-invalid",
-            status="Lookup failed",
-            detail="The lookup request is missing the required track, artist, or username.",
-        )
-        return jsonify({
-            "error": "track, artist, and username are required",
-            "elapsed_ms": elapsed_ms(),
-        }), 400
+    with flask_app.app_context():
+        try:
+            _do_first_listen_lookup(username, track, artist, lookup_id, elapsed_ms)
+        except Exception:
+            flask_app.logger.exception(
+                "background lookup failed %s", lookup_context(username, artist, track)
+            )
+            finish_lookup_progress(
+                lookup_id,
+                stage="lookup-finished",
+                status="Lookup failed",
+                detail="An unexpected error occurred during the lookup.",
+                result={
+                    "error": "Internal lookup error",
+                    "elapsed_ms": elapsed_ms(),
+                },
+            )
 
-    # Return cached result immediately if available (first-listen date never changes)
-    # Skip cache entries that have no date — those are transient failures worth retrying.
-    cached = db.get_cached(username, track, artist)
-    if cached and cached.get("first_listen_date"):
-        app.logger.info(
-            "lookup served from cache %s elapsed_ms=%s",
-            lookup_context(username, artist, track),
-            elapsed_ms(),
-        )
-        cached_timestamp = cached["first_listen_timestamp"] or ""
-        cached_date = cached["first_listen_date"] or ""
-        date_unavailable = not bool(cached_date)
-        db.save_result(
-            username,
-            cached["track"],
-            cached["artist"],
-            cached["album"] or "",
-            cached_date,
-            cached_timestamp,
-            cached["total_scrobbles"] or 0,
-            cached["image"] or "",
-        )
-        finish_lookup_progress(
-            lookup_id,
-            username=username,
-            artist=cached["artist"],
-            track=cached["track"],
-            stage="cache-hit",
-            status="Loaded from cache",
-            detail="This lookup was already cached locally, so no page scan was needed.",
-            pages_checked=1,
-            pages_total=1,
-        )
-        return jsonify(
-            {
-                "found": True,
-                "track": cached["track"],
-                "artist": cached["artist"],
-                "album": cached["album"] or "",
-                "date": cached_date,
-                "timestamp": cached_timestamp,
-                "total_scrobbles": cached["total_scrobbles"],
-                "image": cached["image"] or "",
-                "date_unavailable": date_unavailable,
-                "date_unavailable_reason": (
-                    "Last.fm reports a play for this track, but the public data exposed to the app does not include an exact first-listen timestamp."
-                    if date_unavailable
-                    else ""
-                ),
-                "cached": True,
-                "elapsed_ms": elapsed_ms(),
-            }
-        )
 
+def _do_first_listen_lookup(
+    username: str, track: str, artist: str, lookup_id: str, elapsed_ms
+) -> None:
     # Step 1: Check total play count via track.getInfo (fast, single call)
     try:
         info = lastfm_get(
@@ -872,8 +816,9 @@ def first_listen():
             stage="request-error",
             status="Lookup failed",
             detail="Last.fm returned an API error while loading track metadata.",
+            result={"error": "Last.fm API error", "elapsed_ms": elapsed_ms()},
         )
-        return jsonify({"error": "Last.fm API error", "elapsed_ms": elapsed_ms()}), 502
+        return
 
     track_info = info.get("track", {})
     history_summary = None
@@ -922,17 +867,16 @@ def first_listen():
             detail="Last.fm does not report any scrobbles for this track under this user.",
             pages_checked=1,
             pages_total=1,
-        )
-        return jsonify(
-            {
+            result={
                 "found": False,
                 "track": track,
                 "artist": artist,
                 "message": "You have never listened to this track.",
                 "cached": False,
                 "elapsed_ms": elapsed_ms(),
-            }
+            },
         )
+        return
 
     # Gather album art / album name from the same track.getInfo response
     image_url = ""
@@ -1062,10 +1006,7 @@ def first_listen():
         ),
         pages_checked=current_progress.get("pages_checked"),
         pages_total=current_progress.get("pages_total"),
-    )
-
-    return jsonify(
-        {
+        result={
             "found": True,
             "track": canonical_track,
             "artist": canonical_artist,
@@ -1078,8 +1019,136 @@ def first_listen():
             "date_unavailable_reason": date_unavailable_reason,
             "cached": False,
             "elapsed_ms": elapsed_ms(),
-        }
+        },
     )
+
+
+@app.route("/api/first-listen")
+def first_listen():
+    """Find the very first scrobble of a track for the given user.
+
+    The lookup is executed in a background thread; the endpoint returns
+    immediately with HTTP 202.  The client polls ``/api/lookup-progress``
+    to get progress updates and the final result.
+    """
+    started_at = time.perf_counter()
+
+    def elapsed_ms() -> int:
+        return int((time.perf_counter() - started_at) * 1000)
+
+    lookup_id = request.args.get("lookup_id", "").strip() or None
+    track = request.args.get("track", "").strip()
+    artist = request.args.get("artist", "").strip()
+    username = request.args.get("username", "").strip()
+
+    if not track or not artist or not username:
+        finish_lookup_progress(
+            lookup_id,
+            stage="request-invalid",
+            status="Lookup failed",
+            detail="The lookup request is missing the required track, artist, or username.",
+        )
+        return jsonify({
+            "error": "track, artist, and username are required",
+            "elapsed_ms": elapsed_ms(),
+        }), 400
+
+    if not lookup_id:
+        lookup_id = f"server-{int(time.time() * 1000)}"
+
+    # Return cached result immediately if available (first-listen date never changes)
+    # Skip cache entries that have no date — those are transient failures worth retrying.
+    cached = db.get_cached(username, track, artist)
+    if cached and cached.get("first_listen_date"):
+        app.logger.info(
+            "lookup served from cache %s elapsed_ms=%s",
+            lookup_context(username, artist, track),
+            elapsed_ms(),
+        )
+        cached_timestamp = cached["first_listen_timestamp"] or ""
+        cached_date = cached["first_listen_date"] or ""
+        date_unavailable = not bool(cached_date)
+        db.save_result(
+            username,
+            cached["track"],
+            cached["artist"],
+            cached["album"] or "",
+            cached_date,
+            cached_timestamp,
+            cached["total_scrobbles"] or 0,
+            cached["image"] or "",
+        )
+        finish_lookup_progress(
+            lookup_id,
+            username=username,
+            artist=cached["artist"],
+            track=cached["track"],
+            stage="cache-hit",
+            status="Loaded from cache",
+            detail="This lookup was already cached locally, so no page scan was needed.",
+            pages_checked=1,
+            pages_total=1,
+            result={
+                "found": True,
+                "track": cached["track"],
+                "artist": cached["artist"],
+                "album": cached["album"] or "",
+                "date": cached_date,
+                "timestamp": cached_timestamp,
+                "total_scrobbles": cached["total_scrobbles"],
+                "image": cached["image"] or "",
+                "date_unavailable": date_unavailable,
+                "date_unavailable_reason": (
+                    "Last.fm reports a play for this track, but the public data exposed to the app does not include an exact first-listen timestamp."
+                    if date_unavailable
+                    else ""
+                ),
+                "cached": True,
+                "elapsed_ms": elapsed_ms(),
+            },
+        )
+        return jsonify(
+            {
+                "found": True,
+                "track": cached["track"],
+                "artist": cached["artist"],
+                "album": cached["album"] or "",
+                "date": cached_date,
+                "timestamp": cached_timestamp,
+                "total_scrobbles": cached["total_scrobbles"],
+                "image": cached["image"] or "",
+                "date_unavailable": date_unavailable,
+                "date_unavailable_reason": (
+                    "Last.fm reports a play for this track, but the public data exposed to the app does not include an exact first-listen timestamp."
+                    if date_unavailable
+                    else ""
+                ),
+                "cached": True,
+                "elapsed_ms": elapsed_ms(),
+            }
+        )
+
+    # Start the lookup in a background thread
+    app.logger.info("lookup request accepted (async) %s", lookup_context(username, artist, track))
+    update_lookup_progress(
+        lookup_id,
+        username=username,
+        artist=artist,
+        track=track,
+        stage="request-started",
+        status="Checking Last.fm track metadata",
+        detail="Starting lookup and checking basic track metadata.",
+        pages_checked=None,
+        pages_total=None,
+    )
+    thread = Thread(
+        target=_run_first_listen_lookup,
+        args=(username, track, artist, lookup_id, app),
+        daemon=True,
+    )
+    thread.start()
+
+    return jsonify({"accepted": True, "lookup_id": lookup_id}), 202
 
 
 @app.route("/api/artist-image")

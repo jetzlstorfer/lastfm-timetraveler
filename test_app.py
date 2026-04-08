@@ -15,6 +15,28 @@ import app as app_module
 from app import app
 
 
+def _await_first_listen(client, query_string, timeout=10):
+    """Fire a first-listen request and, if async (202), poll until the result is ready.
+
+    Returns ``(response_data_dict, http_status_code_of_initial_request)``.
+    """
+    resp = client.get(f"/api/first-listen?{query_string}")
+    data = resp.get_json()
+
+    if resp.status_code != 202:
+        return data, resp.status_code
+
+    lookup_id = data["lookup_id"]
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(0.05)
+        prog_resp = client.get(f"/api/lookup-progress?lookup_id={lookup_id}")
+        prog = prog_resp.get_json()
+        if prog.get("result") is not None:
+            return prog["result"], 200
+    raise TimeoutError(f"Lookup {lookup_id} did not complete within {timeout}s")
+
+
 @pytest.fixture(autouse=True)
 def isolated_db(tmp_path):
     """Point the database module at a fresh temp file for every test."""
@@ -324,8 +346,7 @@ class TestFirstListen:
     @patch.object(app_module, "lastfm_get")
     def test_never_listened_track(self, mock_get, client):
         mock_get.return_value = _track_info_response(userplaycount=0)
-        resp = client.get("/api/first-listen?track=Unknown&artist=Nobody&username=testuser")
-        data = resp.get_json()
+        data, status = _await_first_listen(client, "track=Unknown&artist=Nobody&username=testuser")
         assert data["found"] is False
         assert "never" in data["message"].lower()
 
@@ -341,8 +362,7 @@ class TestFirstListen:
             image_url="https://img.example/cover.jpg",
         )
         mock_public_date.return_value = "02 Jan 2007, 20:30"
-        resp = client.get("/api/first-listen?track=TestTrack&artist=TestArtist&username=testuser")
-        data = resp.get_json()
+        data, status = _await_first_listen(client, "track=TestTrack&artist=TestArtist&username=testuser")
 
         assert data["found"] is True
         assert data["track"] == "TestTrack"
@@ -361,8 +381,8 @@ class TestFirstListen:
     def test_no_chart_history_returns_error(self, mock_get, client):
         """Track lookup errors from Last.fm still surface as backend errors."""
         mock_get.side_effect = app_module.requests.HTTPError("503 Server Error")
-        resp = client.get("/api/first-listen?track=Song&artist=Band&username=testuser")
-        assert resp.status_code == 502
+        data, status = _await_first_listen(client, "track=Song&artist=Band&username=testuser")
+        assert "error" in data
 
     @patch.object(app_module, "public_library_first_listen_date")
     @patch.object(app_module, "lastfm_get")
@@ -370,8 +390,7 @@ class TestFirstListen:
         """If the public track page has no date, do not invent one."""
         mock_get.return_value = _track_info_response(userplaycount=10, track="X", artist="Y")
         mock_public_date.return_value = None
-        resp = client.get("/api/first-listen?track=X&artist=Y&username=testuser")
-        data = resp.get_json()
+        data, status = _await_first_listen(client, "track=X&artist=Y&username=testuser")
 
         assert data["found"] is True
         assert data["date"] == ""
@@ -395,10 +414,11 @@ class TestFirstListen:
         mock_public_date.return_value = None
         mock_recent_first_listen.side_effect = RuntimeError("scan aborted")
 
-        with pytest.raises(RuntimeError, match="scan aborted"):
-            client.get(
-                "/api/first-listen?track=Bologna&artist=Wanda&username=testuser"
-            )
+        # The async lookup catches the RuntimeError in the background thread,
+        # so we just wait for the lookup to finish (with an error result).
+        data, status = _await_first_listen(
+            client, "track=Bologna&artist=Wanda&username=testuser"
+        )
 
         cached = database.get_cached("testuser", "Bologna", "Wanda")
         assert cached is not None
@@ -414,8 +434,7 @@ class TestFirstListen:
         """If Last.fm reports a playcount but the public track page has no exact date, return unavailable."""
         mock_get.return_value = _track_info_response(userplaycount=1, track="Rare Song", artist="Rare Artist")
         mock_public_date.return_value = None
-        resp = client.get("/api/first-listen?track=Rare+Song&artist=Rare+Artist&username=testuser")
-        data = resp.get_json()
+        data, status = _await_first_listen(client, "track=Rare+Song&artist=Rare+Artist&username=testuser")
 
         assert data["found"] is True
         assert data["date"] == ""
@@ -427,8 +446,8 @@ class TestFirstListen:
     def test_track_getinfo_http_error_returns_502(self, mock_get, client):
         import requests as req
         mock_get.side_effect = req.HTTPError("503 Server Error")
-        resp = client.get("/api/first-listen?track=A&artist=B&username=testuser")
-        assert resp.status_code == 502
+        data, status = _await_first_listen(client, "track=A&artist=B&username=testuser")
+        assert "error" in data
 
     @patch.object(app_module, "public_library_first_listen_date")
     @patch.object(app_module, "lastfm_get")
@@ -436,8 +455,7 @@ class TestFirstListen:
         """A single public track page date is returned correctly."""
         mock_get.return_value = _track_info_response(userplaycount=1, track="Only", artist="One")
         mock_public_date.return_value = "03 Jan 2007, 10:00"
-        resp = client.get("/api/first-listen?track=Only&artist=One&username=testuser")
-        data = resp.get_json()
+        data, status = _await_first_listen(client, "track=Only&artist=One&username=testuser")
 
         assert data["found"] is True
         assert data["date"] == "03 Jan 2007, 10:00"
@@ -450,8 +468,7 @@ class TestFirstListen:
         """Canonical names from track.getInfo are used for the public page lookup."""
         mock_get.return_value = _track_info_response(userplaycount=3, track="My Song", artist="The Band")
         mock_public_date.return_value = "15 Jan 2007, 12:00"
-        resp = client.get("/api/first-listen?track=My+Song&artist=The+Band&username=testuser")
-        data = resp.get_json()
+        data, status = _await_first_listen(client, "track=My+Song&artist=The+Band&username=testuser")
         assert data["found"] is True
         assert data["timestamp"] == "1168858800"
 
@@ -494,10 +511,9 @@ class TestFirstListen:
 
         mock_get.side_effect = fake_lastfm
 
-        resp = client.get(
-            "/api/first-listen?track=My+First+Trumpet&artist=Autonarkose&username=testuser"
+        data, status = _await_first_listen(
+            client, "track=My+First+Trumpet&artist=Autonarkose&username=testuser"
         )
-        data = resp.get_json()
 
         assert data["found"] is True
         assert data["date"] == "05 Mar 2008, 21:17"
@@ -539,10 +555,9 @@ class TestFirstListen:
 
         mock_get.side_effect = fake_lastfm
 
-        resp = client.get(
-            "/api/first-listen?track=Missing+Count+Song&artist=Hidden+Artist&username=testuser"
+        data, status = _await_first_listen(
+            client, "track=Missing+Count+Song&artist=Hidden+Artist&username=testuser"
         )
-        data = resp.get_json()
 
         assert data["found"] is True
         assert data["date"] == "01 Jan 2012, 08:00"
@@ -561,8 +576,7 @@ class TestDatabaseCaching:
         """After a successful lookup the result must be stored in the DB."""
         mock_get.return_value = _track_info_response(userplaycount=5, track="Cached Song", artist="Artist")
         mock_public_date.return_value = "10 Jan 2007, 09:00"
-        resp = client.get("/api/first-listen?track=Cached+Song&artist=Artist&username=testuser")
-        data = resp.get_json()
+        data, status = _await_first_listen(client, "track=Cached+Song&artist=Artist&username=testuser")
         assert data["found"] is True
         assert data["cached"] is False
         assert isinstance(data["elapsed_ms"], int)
@@ -592,8 +606,7 @@ class TestDatabaseCaching:
         mock_get.return_value = _track_info_response(userplaycount=1, track="Sparse Song", artist="Sparse Artist")
         mock_public_date.return_value = None
 
-        resp = client.get("/api/first-listen?track=Sparse+Song&artist=Sparse+Artist&username=testuser")
-        data = resp.get_json()
+        data, status = _await_first_listen(client, "track=Sparse+Song&artist=Sparse+Artist&username=testuser")
 
         assert data["found"] is True
         # Should NOT come from cache — a fresh API call should be made

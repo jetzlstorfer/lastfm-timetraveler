@@ -1178,6 +1178,9 @@
       return `lookup-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     }
 
+    // Resolve function for the pending async lookup promise.
+    let _lookupResolve = null;
+
     function stopLookupProgressPolling() {
       clearInterval(lookupProgressInterval);
       lookupProgressInterval = null;
@@ -1199,6 +1202,12 @@
       updateLoadingElapsed();
       if (progress.active === false) {
         stopLookupProgressPolling();
+        // If the progress payload contains the final result, resolve the
+        // pending lookup promise so selectResult can render it.
+        if (progress.result && _lookupResolve) {
+          _lookupResolve(progress.result);
+          _lookupResolve = null;
+        }
       }
     }
 
@@ -1615,7 +1624,26 @@
 
       try {
         const res = await fetch(`/api/first-listen?track=${encodeURIComponent(track.name)}&artist=${encodeURIComponent(track.artist)}&username=${encodeURIComponent(currentUsername)}&lookup_id=${encodeURIComponent(lookupId)}`);
-        const data = await res.json();
+        const body = await res.json();
+
+        let data;
+        if (res.status === 202 && body.accepted) {
+          // Async lookup — wait for result via progress polling.
+          // Safety timeout: if the server never delivers a result within 10
+          // minutes, give up so the UI doesn't hang forever.
+          data = await new Promise((resolve, reject) => {
+            _lookupResolve = resolve;
+            setTimeout(() => {
+              if (_lookupResolve) {
+                _lookupResolve = null;
+                reject(new Error('Lookup timed out'));
+              }
+            }, 10 * 60 * 1000);
+          });
+        } else {
+          data = body;
+        }
+
         stopLoadingAnimation();
         console.info('[lookup:done]', {
           track: data.track || track.name,
@@ -1695,6 +1723,7 @@
         }
         loadRecentSearches();
       } catch {
+        _lookupResolve = null;
         stopLoadingAnimation();
         console.error('[lookup:error]', { username: currentUsername, track: track.name, artist: track.artist });
         showError('Something went wrong. Please try again.');
