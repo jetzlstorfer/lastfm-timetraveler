@@ -807,7 +807,7 @@ def _do_first_listen_lookup(
         info = lastfm_get(
             "track.getInfo", track=track, artist=artist, username=username
         )
-    except requests.HTTPError:
+    except Exception:
         finish_lookup_progress(
             lookup_id,
             username=username,
@@ -820,7 +820,7 @@ def _do_first_listen_lookup(
         )
         return
 
-    track_info = info.get("track", {})
+    track_info = info.get("track") or {}
     history_summary = None
     userplaycount = track_info.get("userplaycount")
     total = int(userplaycount or 0)
@@ -881,7 +881,7 @@ def _do_first_listen_lookup(
     # Gather album art / album name from the same track.getInfo response
     image_url = ""
     album_name = ""
-    album_data = track_info.get("album", {})
+    album_data = track_info.get("album") or {}
     album_name = album_data.get("title", "")
     for img in album_data.get("image", []):
         if img.get("size") == "extralarge" and img.get("#text") and not is_placeholder(img["#text"]):
@@ -889,7 +889,7 @@ def _do_first_listen_lookup(
 
     # Canonical names from Last.fm
     canonical_track = track_info.get("name", track)
-    canonical_artist = track_info.get("artist", {}).get("name", artist)
+    canonical_artist = (track_info.get("artist") or {}).get("name", artist)
     exact_date = history_summary["date"] if history_summary else None
     exact_ts = history_summary["timestamp"] if history_summary else ""
     date_unavailable_reason = ""
