@@ -127,6 +127,9 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
   name: containerAppName
   location: location
   tags: union(tags, { 'azd-service-name': 'web' })
+  dependsOn: [
+    envStorage
+  ]
   properties: {
     managedEnvironmentId: containerAppsEnvironment.id
     configuration: {
