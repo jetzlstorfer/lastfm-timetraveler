@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import time
 from unittest.mock import patch
 
@@ -160,6 +161,85 @@ class TestStatus:
         data = resp.get_json()
         assert data["ok"] is False
         assert "LASTFM_API_KEY" in data["error"]
+
+
+class TestReadiness:
+    @patch.object(app_module, "LASTFM_API_KEY", "valid_key")
+    def test_ready_ok(self, client):
+        resp = client.get("/api/ready")
+        data = resp.get_json()
+
+        assert resp.status_code == 200
+        assert data["ok"] is True
+
+    @patch.object(app_module, "LASTFM_API_KEY", "")
+    def test_ready_missing_api_key(self, client):
+        resp = client.get("/api/ready")
+        data = resp.get_json()
+
+        assert resp.status_code == 503
+        assert data["ok"] is False
+
+    @patch.object(app_module, "LASTFM_API_KEY", "valid_key")
+    @patch.object(database, "init_db", side_effect=sqlite3.OperationalError("database is locked"))
+    def test_ready_returns_503_when_database_unavailable(self, _mock_init_db, client):
+        resp = client.get("/api/ready")
+        data = resp.get_json()
+
+        assert resp.status_code == 503
+        assert data["ok"] is False
+        assert "Database is not ready" in data["error"]
+
+
+class TestDatabaseInitialization:
+    def test_init_db_waits_for_transient_lock(self, tmp_path):
+        db_file = str(tmp_path / "startup-lock.db")
+        lock_acquired = threading.Event()
+        release_lock = threading.Event()
+        init_completed = threading.Event()
+        init_errors = []
+
+        def hold_exclusive_lock():
+            with sqlite3.connect(db_file, timeout=1) as conn:
+                conn.execute("BEGIN EXCLUSIVE")
+                conn.execute("CREATE TABLE IF NOT EXISTS startup_lock (id INTEGER)")
+                lock_acquired.set()
+                release_lock.wait(timeout=5)
+                conn.commit()
+
+        def run_init_db():
+            try:
+                database.init_db()
+            except Exception as exc:  # pragma: no cover - asserted below
+                init_errors.append(exc)
+            finally:
+                init_completed.set()
+
+        with patch.object(database, "DB_PATH", db_file):
+            lock_thread = threading.Thread(target=hold_exclusive_lock)
+            init_thread = threading.Thread(target=run_init_db)
+
+            lock_thread.start()
+            assert lock_acquired.wait(timeout=5)
+
+            init_thread.start()
+            time.sleep(0.2)
+            assert init_completed.is_set() is False
+
+            release_lock.set()
+
+            init_thread.join(timeout=5)
+            lock_thread.join(timeout=5)
+
+        assert init_errors == []
+        assert init_completed.is_set() is True
+
+        with sqlite3.connect(db_file) as conn:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'searches'"
+            ).fetchone()
+
+        assert row is not None
 
 
 # ---------------------------------------------------------------------------

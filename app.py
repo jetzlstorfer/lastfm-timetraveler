@@ -17,9 +17,6 @@ load_dotenv()
 app = Flask(__name__, static_folder="static")
 app.logger.setLevel(logging.INFO)
 
-with app.app_context():
-    db.init_db()
-
 LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
 LASTFM_BASE = "https://ws.audioscrobbler.com/2.0/"
 LIBRARY_PAGE_SIZE = 50
@@ -564,6 +561,21 @@ def status():
     """Health check — verifies API key is configured."""
     if not LASTFM_API_KEY or LASTFM_API_KEY == "your_api_key_here":
         return jsonify({"ok": False, "error": "LASTFM_API_KEY is not set. Copy .env.example to .env and add your key."}), 200
+    return jsonify({"ok": True})
+
+
+@app.route("/api/ready")
+def ready():
+    """Readiness check — verifies the API key and database are usable."""
+    if not LASTFM_API_KEY or LASTFM_API_KEY == "your_api_key_here":
+        return jsonify({"ok": False, "error": "LASTFM_API_KEY is not set. Copy .env.example to .env and add your key."}), 503
+
+    try:
+        db.init_db()
+    except Exception as exc:
+        app.logger.exception("database readiness check failed")
+        return jsonify({"ok": False, "error": f"Database is not ready: {exc}"}), 503
+
     return jsonify({"ok": True})
 
 
