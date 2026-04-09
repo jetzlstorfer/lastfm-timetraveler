@@ -1468,7 +1468,7 @@
             <div class="otd-period-header">
               <span class="otd-years-badge">${period.years_ago} year${period.years_ago > 1 ? 's' : ''} ago</span>
               <span class="otd-date">${period.date}</span>
-              <span class="otd-total">${period.total_scrobbles} scrobbles that day</span>
+              <span class="otd-total">${period.total_scrobbles >= 50 ? '50+' : period.total_scrobbles} scrobbles that day</span>
             </div>
             <div class="otd-tracks">
               ${period.tracks.map((track) => `
@@ -1632,6 +1632,7 @@
       const lookupId = createLookupId();
       console.info('[lookup:start]', { username: currentUsername, track: track.name, artist: track.artist });
       startLoadingAnimation();
+      loadingScreen.scrollIntoView({ behavior: 'smooth', block: 'start' });
       startLookupProgressPolling(lookupId);
 
       try {
@@ -1674,6 +1675,7 @@
         if (!data.found) {
           resultCard.innerHTML = `<div class="not-found">😔 You have never listened to <strong>${escHtml(track.name)}</strong> by ${escHtml(track.artist)}.</div>`;
           resultCard.classList.add('show');
+          resultCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
           return;
         }
 
@@ -1730,6 +1732,7 @@
           </div>
         `;
         resultCard.classList.add('show');
+        resultCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
         if (resultNeedsArtistFallback) {
           applyArtistFallback(document.getElementById('result-art'), data.artist);
         }
@@ -1745,6 +1748,7 @@
     function showError(message) {
       resultCard.innerHTML = `<div class="not-found">⚠️ ${escHtml(message)}</div>`;
       resultCard.classList.add('show');
+      resultCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
     function relativeTime(date) {
