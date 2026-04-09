@@ -45,6 +45,8 @@ def isolated_db(tmp_path):
         database.init_db()
         with app_module.LOOKUP_PROGRESS_LOCK:
             app_module.LOOKUP_PROGRESS.clear()
+        with app_module.LISTENING_HISTORY_CACHE_LOCK:
+            app_module.LISTENING_HISTORY_CACHE.clear()
         yield db_file
 
 
@@ -843,3 +845,29 @@ class TestListeningHistory:
             assert len(data) >= 1
             assert data[0]["plays"] == 0
 
+    def test_cached_response_avoids_api_calls(self, client):
+        """Second request for the same track should be served from cache."""
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        from_ts = int(month_start.timestamp())
+        to_ts = from_ts + 7 * 86400
+
+        api_calls = [0]
+
+        def fake_get(method, **kwargs):
+            api_calls[0] += 1
+            if method == "user.getWeeklyChartList":
+                return _weekly_chart_list([(from_ts, to_ts)])
+            return _weekly_track_chart([("CachedSong", "CachedArtist", 5)])
+
+        with patch("app.lastfm_get", side_effect=fake_get):
+            resp1 = client.get("/api/listening-history?username=cacheuser&track=CachedSong&artist=CachedArtist&months=2")
+            assert resp1.status_code == 200
+            calls_after_first = api_calls[0]
+
+            resp2 = client.get("/api/listening-history?username=cacheuser&track=CachedSong&artist=CachedArtist&months=2")
+            assert resp2.status_code == 200
+            assert api_calls[0] == calls_after_first, "Second request should not trigger new API calls"
+            assert resp1.get_json() == resp2.get_json()
