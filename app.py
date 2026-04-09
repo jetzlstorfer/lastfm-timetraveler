@@ -2,6 +2,7 @@ import os
 import re
 import time
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock, Thread
 from math import ceil
 from datetime import datetime, timezone, timedelta
@@ -1206,6 +1207,134 @@ def history():
             for r in results
         ]
     )
+
+
+LISTENING_HISTORY_CACHE: dict[str, dict] = {}
+LISTENING_HISTORY_CACHE_LOCK = Lock()
+LISTENING_HISTORY_CACHE_TTL_SECONDS = 30 * 60
+LISTENING_HISTORY_MAX_WORKERS = 6
+
+
+def _listening_history_cache_key(username: str, track: str, artist: str, months: int) -> str:
+    return "|".join([
+        normalize_lastfm_text(username),
+        normalize_lastfm_text(track),
+        normalize_lastfm_text(artist),
+        str(months),
+    ])
+
+
+def _fetch_week_plays(
+    username: str, week: dict, norm_track: str, norm_artist: str
+) -> int:
+    """Fetch a single weekly track chart and return the play count for the target track."""
+    try:
+        weekly_data = lastfm_get(
+            "user.getWeeklyTrackChart",
+            user=username,
+            **{"from": week["from"], "to": week["to"]},
+        )
+    except Exception:
+        return 0
+
+    week_tracks = weekly_data.get("weeklytrackchart", {}).get("track", [])
+    if isinstance(week_tracks, dict):
+        week_tracks = [week_tracks]
+    for t in week_tracks:
+        t_name = normalize_lastfm_text(t.get("name", ""))
+        t_artist = normalize_lastfm_text(extract_artist_name(t.get("artist")))
+        if t_name == norm_track and t_artist == norm_artist:
+            return int(t.get("playcount", 0))
+    return 0
+
+
+@app.route("/api/listening-history")
+def listening_history():
+    """Return monthly play counts for a track over the user's scrobble history.
+
+    Uses the Last.fm weekly chart list to identify chart periods, then queries
+    weekly track charts **in parallel** to collect play counts, aggregated by
+    calendar month.  Results are cached for 30 minutes.
+    """
+    username = request.args.get("username", "").strip()
+    track = request.args.get("track", "").strip()
+    artist = request.args.get("artist", "").strip()
+    months_param = request.args.get("months", "12").strip()
+
+    if not username or not track or not artist:
+        return jsonify({"error": "username, track, and artist are required"}), 400
+
+    try:
+        max_months = min(int(months_param), 36)
+    except (ValueError, TypeError):
+        max_months = 12
+
+    # Check cache
+    cache_key = _listening_history_cache_key(username, track, artist, max_months)
+    with LISTENING_HISTORY_CACHE_LOCK:
+        cached = LISTENING_HISTORY_CACHE.get(cache_key)
+        if cached and time.time() - cached["ts"] < LISTENING_HISTORY_CACHE_TTL_SECONDS:
+            return jsonify(cached["data"])
+
+    try:
+        chart_list_data = lastfm_get("user.getWeeklyChartList", user=username)
+    except Exception:
+        return jsonify({"error": "Failed to fetch chart list from Last.fm"}), 502
+
+    charts = chart_list_data.get("weeklychartlist", {}).get("chart", [])
+    if not charts:
+        return jsonify([])
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=max_months * 31)
+    cutoff_ts = int(cutoff.timestamp())
+
+    # Group chart weeks into calendar months
+    monthly_weeks: dict[str, list[dict]] = {}
+    for chart in charts:
+        from_ts = int(chart.get("from", 0))
+        if from_ts < cutoff_ts:
+            continue
+        month_key = datetime.fromtimestamp(from_ts, tz=timezone.utc).strftime("%Y-%m")
+        monthly_weeks.setdefault(month_key, []).append(chart)
+
+    norm_track = normalize_lastfm_text(track)
+    norm_artist = normalize_lastfm_text(artist)
+
+    # Flatten all weeks across months for parallel fetching
+    week_jobs: list[tuple[str, dict]] = []
+    for month_key in sorted(monthly_weeks.keys()):
+        for week in monthly_weeks[month_key]:
+            week_jobs.append((month_key, week))
+
+    # Fetch weekly charts in parallel
+    month_plays: dict[str, int] = {mk: 0 for mk in monthly_weeks}
+    with ThreadPoolExecutor(max_workers=LISTENING_HISTORY_MAX_WORKERS) as pool:
+        future_to_month = {
+            pool.submit(_fetch_week_plays, username, week, norm_track, norm_artist): month_key
+            for month_key, week in week_jobs
+        }
+        for future in as_completed(future_to_month):
+            month_key = future_to_month[future]
+            try:
+                month_plays[month_key] += future.result()
+            except Exception:
+                pass
+
+    result = []
+    for month_key in sorted(monthly_weeks.keys()):
+        dt = datetime.strptime(month_key, "%Y-%m")
+        result.append({
+            "month": month_key,
+            "label": dt.strftime("%b %Y"),
+            "plays": month_plays[month_key],
+        })
+
+    # Store in cache
+    with LISTENING_HISTORY_CACHE_LOCK:
+        LISTENING_HISTORY_CACHE[cache_key] = {"data": result, "ts": time.time()}
+
+    return jsonify(result)
 
 
 if __name__ == "__main__":

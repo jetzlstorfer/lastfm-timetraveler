@@ -45,6 +45,8 @@ def isolated_db(tmp_path):
         database.init_db()
         with app_module.LOOKUP_PROGRESS_LOCK:
             app_module.LOOKUP_PROGRESS.clear()
+        with app_module.LISTENING_HISTORY_CACHE_LOCK:
+            app_module.LISTENING_HISTORY_CACHE.clear()
         yield db_file
 
 
@@ -756,3 +758,116 @@ class TestHistory:
             assert data[0]["track"] == "Track Beta", "Higher id must always sort first for equal timestamps"
             assert data[1]["track"] == "Track Alpha"
 
+
+# ---------------------------------------------------------------------------
+# /api/listening-history
+# ---------------------------------------------------------------------------
+
+class TestListeningHistory:
+    """Tests for the listening-history endpoint."""
+
+    def test_missing_params_returns_400(self, client):
+        resp = client.get("/api/listening-history?username=u&track=t")
+        assert resp.status_code == 400
+
+    def test_empty_chart_list_returns_empty(self, client):
+        with patch("app.lastfm_get") as mock_get:
+            mock_get.return_value = {"weeklychartlist": {"chart": []}}
+            resp = client.get("/api/listening-history?username=u&track=Song&artist=Band")
+            assert resp.status_code == 200
+            assert resp.get_json() == []
+
+    def test_returns_monthly_play_counts(self, client):
+        import calendar
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        # Build 4 chart weeks within the current month
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        weeks = []
+        for i in range(4):
+            from_ts = int(month_start.timestamp()) + i * 7 * 86400
+            to_ts = from_ts + 7 * 86400
+            weeks.append((from_ts, to_ts))
+
+        chart_list = _weekly_chart_list(weeks)
+        weekly_chart_with_track = _weekly_track_chart([("MySong", "MyArtist", 3)])
+        weekly_chart_empty = _weekly_track_chart([("OtherSong", "OtherArtist", 5)])
+
+        def fake_get(method, **kwargs):
+            if method == "user.getWeeklyChartList":
+                return chart_list
+            if method == "user.getWeeklyTrackChart":
+                # Return matching track for first two weeks, empty for the rest
+                from_val = int(kwargs.get("from", 0))
+                if from_val in (weeks[0][0], weeks[1][0]):
+                    return weekly_chart_with_track
+                return weekly_chart_empty
+            return {}
+
+        with patch("app.lastfm_get", side_effect=fake_get):
+            resp = client.get("/api/listening-history?username=u&track=MySong&artist=MyArtist&months=2")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert len(data) >= 1
+            month_key = month_start.strftime("%Y-%m")
+            entry = next((d for d in data if d["month"] == month_key), None)
+            assert entry is not None
+            assert entry["plays"] == 6  # 3 plays × 2 weeks
+            assert "label" in entry
+
+    def test_chart_list_api_failure_returns_502(self, client):
+        with patch("app.lastfm_get", side_effect=Exception("API down")):
+            resp = client.get("/api/listening-history?username=u&track=t&artist=a")
+            assert resp.status_code == 502
+
+    def test_weekly_chart_failure_still_returns_data(self, client):
+        """If individual weekly chart calls fail, the month should still appear with 0 plays."""
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        from_ts = int(month_start.timestamp())
+        to_ts = from_ts + 7 * 86400
+
+        call_count = [0]
+
+        def fake_get(method, **kwargs):
+            if method == "user.getWeeklyChartList":
+                return _weekly_chart_list([(from_ts, to_ts)])
+            call_count[0] += 1
+            raise Exception("chart fetch failed")
+
+        with patch("app.lastfm_get", side_effect=fake_get):
+            resp = client.get("/api/listening-history?username=u&track=t&artist=a&months=2")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert len(data) >= 1
+            assert data[0]["plays"] == 0
+
+    def test_cached_response_avoids_api_calls(self, client):
+        """Second request for the same track should be served from cache."""
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        from_ts = int(month_start.timestamp())
+        to_ts = from_ts + 7 * 86400
+
+        api_calls = [0]
+
+        def fake_get(method, **kwargs):
+            api_calls[0] += 1
+            if method == "user.getWeeklyChartList":
+                return _weekly_chart_list([(from_ts, to_ts)])
+            return _weekly_track_chart([("CachedSong", "CachedArtist", 5)])
+
+        with patch("app.lastfm_get", side_effect=fake_get):
+            resp1 = client.get("/api/listening-history?username=cacheuser&track=CachedSong&artist=CachedArtist&months=2")
+            assert resp1.status_code == 200
+            calls_after_first = api_calls[0]
+
+            resp2 = client.get("/api/listening-history?username=cacheuser&track=CachedSong&artist=CachedArtist&months=2")
+            assert resp2.status_code == 200
+            assert api_calls[0] == calls_after_first, "Second request should not trigger new API calls"
+            assert resp1.get_json() == resp2.get_json()

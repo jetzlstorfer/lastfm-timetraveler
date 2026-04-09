@@ -42,6 +42,7 @@
     };
   </script>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
   <style>
     * {
       box-sizing: border-box;
@@ -592,6 +593,60 @@
       padding: 1.5rem;
       color: #d6d3d1;
       font-size: 1rem;
+    }
+
+    .listening-history-section {
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 1.25rem 1.5rem 1.5rem;
+    }
+
+    .listening-history-header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 1rem;
+    }
+
+    .listening-history-header .stat-icon {
+      width: 2.5rem;
+      flex-shrink: 0;
+      font-size: 1.4rem;
+      line-height: 1.8rem;
+      text-align: center;
+    }
+
+    .listening-history-header .stat-label {
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+
+    .listening-history-chart-wrap {
+      position: relative;
+      width: 100%;
+      height: 200px;
+    }
+
+    .listening-history-loading {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      color: #a8a29e;
+      font-size: 0.85rem;
+      padding: 1rem 0;
+    }
+
+    .listening-history-loading .spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(255,255,255,0.15);
+      border-top-color: #d51007;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
     }
 
     .loading-screen {
@@ -1730,18 +1785,133 @@
               </div>
             </div>
           </div>
+          <div class="listening-history-section" id="listening-history-section">
+            <div class="listening-history-header">
+              <span class="stat-icon">📊</span>
+              <div>
+                <div class="stat-label">Listening history</div>
+              </div>
+            </div>
+            <div class="listening-history-loading" id="listening-history-loading">
+              <div class="spinner"></div>
+              <span>Loading listening history…</span>
+            </div>
+            <div class="listening-history-chart-wrap" id="listening-history-chart-wrap" style="display:none">
+              <canvas id="listening-history-chart"></canvas>
+            </div>
+          </div>
         `;
         resultCard.classList.add('show');
         resultCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
         if (resultNeedsArtistFallback) {
           applyArtistFallback(document.getElementById('result-art'), data.artist);
         }
+        fetchAndRenderListeningHistory(data.track, data.artist);
         loadRecentSearches();
       } catch {
         _lookupResolve = null;
         stopLoadingAnimation();
         console.error('[lookup:error]', { username: currentUsername, track: track.name, artist: track.artist });
         showError('Something went wrong. Please try again.');
+      }
+    }
+
+    let _listeningHistoryChart = null;
+
+    async function fetchAndRenderListeningHistory(track, artist) {
+      const loadingEl = document.getElementById('listening-history-loading');
+      const chartWrap = document.getElementById('listening-history-chart-wrap');
+      const canvas = document.getElementById('listening-history-chart');
+      if (!loadingEl || !chartWrap || !canvas) return;
+
+      try {
+        const url = `/api/listening-history?username=${encodeURIComponent(currentUsername)}&track=${encodeURIComponent(track)}&artist=${encodeURIComponent(artist)}&months=12`;
+        const res = await fetch(url);
+        const historyData = await res.json();
+
+        if (!Array.isArray(historyData) || historyData.length === 0 || historyData.every(d => d.plays === 0)) {
+          loadingEl.innerHTML = '<span style="color:#78716c">No monthly listening data available.</span>';
+          return;
+        }
+
+        if (_listeningHistoryChart) {
+          _listeningHistoryChart.destroy();
+          _listeningHistoryChart = null;
+        }
+
+        loadingEl.style.display = 'none';
+        chartWrap.style.display = 'block';
+
+        const labels = historyData.map(d => d.label);
+        const plays = historyData.map(d => d.plays);
+
+        const ctx = canvas.getContext('2d');
+        const gradient = ctx.createLinearGradient(0, 0, 0, 200);
+        gradient.addColorStop(0, 'rgba(213, 16, 7, 0.7)');
+        gradient.addColorStop(1, 'rgba(213, 16, 7, 0.08)');
+
+        _listeningHistoryChart = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels,
+            datasets: [{
+              label: 'Plays',
+              data: plays,
+              fill: true,
+              backgroundColor: gradient,
+              borderColor: 'rgba(213, 16, 7, 0.9)',
+              borderWidth: 2,
+              pointBackgroundColor: '#d51007',
+              pointBorderColor: '#fff',
+              pointBorderWidth: 1.5,
+              pointRadius: 4,
+              pointHoverRadius: 6,
+              tension: 0.35,
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                backgroundColor: 'rgba(30, 27, 58, 0.95)',
+                titleColor: '#fff',
+                bodyColor: '#d6d3d1',
+                borderColor: 'rgba(255,255,255,0.1)',
+                borderWidth: 1,
+                cornerRadius: 8,
+                padding: 10,
+                callbacks: {
+                  label: ctx => `${ctx.parsed.y} play${ctx.parsed.y !== 1 ? 's' : ''}`,
+                },
+              },
+            },
+            scales: {
+              x: {
+                ticks: { color: '#78716c', font: { size: 11 }, maxRotation: 45 },
+                grid: { display: false },
+                border: { display: false },
+              },
+              y: {
+                beginAtZero: true,
+                ticks: {
+                  color: '#78716c',
+                  font: { size: 11 },
+                  stepSize: 1,
+                  precision: 0,
+                },
+                grid: { color: 'rgba(255,255,255,0.04)' },
+                border: { display: false },
+              },
+            },
+          },
+        });
+      } catch (err) {
+        console.error('[listening-history:error]', err);
+        if (loadingEl) {
+          loadingEl.innerHTML = '<span style="color:#78716c">Could not load listening history.</span>';
+        }
       }
     }
 
