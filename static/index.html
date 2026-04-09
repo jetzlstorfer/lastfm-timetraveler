@@ -1851,17 +1851,22 @@
         gradient.addColorStop(1, 'rgba(213, 16, 7, 0.08)');
 
         _listeningHistoryChart = new Chart(ctx, {
-          type: 'bar',
+          type: 'line',
           data: {
             labels,
             datasets: [{
               label: 'Plays',
               data: plays,
+              fill: true,
               backgroundColor: gradient,
               borderColor: 'rgba(213, 16, 7, 0.9)',
-              borderWidth: 1,
-              borderRadius: 4,
-              borderSkipped: false,
+              borderWidth: 2,
+              pointBackgroundColor: '#d51007',
+              pointBorderColor: '#fff',
+              pointBorderWidth: 1.5,
+              pointRadius: 4,
+              pointHoverRadius: 6,
+              tension: 0.35,
             }]
           },
           options: {
