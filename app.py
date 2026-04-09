@@ -1208,5 +1208,85 @@ def history():
     )
 
 
+@app.route("/api/listening-history")
+def listening_history():
+    """Return monthly play counts for a track over the user's scrobble history.
+
+    Uses the Last.fm weekly chart list to identify chart periods, then queries
+    weekly track charts to collect play counts, aggregated by calendar month.
+    """
+    username = request.args.get("username", "").strip()
+    track = request.args.get("track", "").strip()
+    artist = request.args.get("artist", "").strip()
+    months_param = request.args.get("months", "12").strip()
+
+    if not username or not track or not artist:
+        return jsonify({"error": "username, track, and artist are required"}), 400
+
+    try:
+        max_months = min(int(months_param), 36)
+    except (ValueError, TypeError):
+        max_months = 12
+
+    try:
+        chart_list_data = lastfm_get("user.getWeeklyChartList", user=username)
+    except Exception:
+        return jsonify({"error": "Failed to fetch chart list from Last.fm"}), 502
+
+    charts = chart_list_data.get("weeklychartlist", {}).get("chart", [])
+    if not charts:
+        return jsonify([])
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=max_months * 31)
+    cutoff_ts = int(cutoff.timestamp())
+
+    # Group chart weeks into calendar months
+    monthly_weeks: dict[str, list[dict]] = {}
+    for chart in charts:
+        from_ts = int(chart.get("from", 0))
+        if from_ts < cutoff_ts:
+            continue
+        month_key = datetime.fromtimestamp(from_ts, tz=timezone.utc).strftime("%Y-%m")
+        monthly_weeks.setdefault(month_key, []).append(chart)
+
+    norm_track = normalize_lastfm_text(track)
+    norm_artist = normalize_lastfm_text(artist)
+
+    result = []
+    for month_key in sorted(monthly_weeks.keys()):
+        month_plays = 0
+        for week in monthly_weeks[month_key]:
+            try:
+                weekly_data = lastfm_get(
+                    "user.getWeeklyTrackChart",
+                    user=username,
+                    **{"from": week["from"], "to": week["to"]},
+                )
+            except Exception:
+                continue
+
+            week_tracks = weekly_data.get("weeklytrackchart", {}).get("track", [])
+            if isinstance(week_tracks, dict):
+                week_tracks = [week_tracks]
+            for t in week_tracks:
+                t_name = normalize_lastfm_text(t.get("name", ""))
+                t_artist = normalize_lastfm_text(
+                    extract_artist_name(t.get("artist"))
+                )
+                if t_name == norm_track and t_artist == norm_artist:
+                    month_plays += int(t.get("playcount", 0))
+                    break
+
+        dt = datetime.strptime(month_key, "%Y-%m")
+        result.append({
+            "month": month_key,
+            "label": dt.strftime("%b %Y"),
+            "plays": month_plays,
+        })
+
+    return jsonify(result)
+
+
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
