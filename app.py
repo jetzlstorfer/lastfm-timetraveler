@@ -654,6 +654,41 @@ def user_top_tracks():
         return jsonify([])
 
 
+@app.route("/api/user/recent-tracks")
+def user_recent_tracks():
+    """Get a user's most recently scrobbled tracks."""
+    username = request.args.get("username", "").strip()
+    if not username:
+        return jsonify({"error": "username is required"}), 400
+    try:
+        data = lastfm_get("user.getRecentTracks", user=username, limit=10)
+        tracks = data.get("recenttracks", {}).get("track", [])
+        if isinstance(tracks, dict):
+            tracks = [tracks]
+        results = []
+        for t in tracks:
+            # Skip "now playing" entries which have no timestamp
+            if t.get("@attr", {}).get("nowplaying"):
+                continue
+            artist = t.get("artist", {})
+            artist_name = artist.get("#text", "") if isinstance(artist, dict) else str(artist)
+            image_url = ""
+            for img in t.get("image", []):
+                if img.get("size") == "medium" and img.get("#text") and not is_placeholder(img["#text"]):
+                    image_url = img["#text"]
+            date_info = t.get("date", {})
+            played_at = date_info.get("#text", "") if isinstance(date_info, dict) else ""
+            results.append({
+                "name": t.get("name", ""),
+                "artist": artist_name,
+                "image": image_url,
+                "played_at": played_at,
+            })
+        return jsonify(results)
+    except Exception:
+        return jsonify([])
+
+
 @app.route("/api/on-this-day")
 def on_this_day():
     """Find what the user was listening to on this day 1, 5, and 10 years ago."""
