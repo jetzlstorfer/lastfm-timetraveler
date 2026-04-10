@@ -1015,7 +1015,7 @@
         <div class="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <div class="section-eyebrow text-xs font-semibold uppercase tracking-[0.16em]">Current context</div>
-            <div class="section-title mt-2">🎵 Your top tracks</div>
+            <div class="section-title mt-2" id="top-tracks-heading">🎵 Your top tracks</div>
           </div>
           <select class="period-select" id="period-select">
             <option value="7day">Last 7 days</option>
@@ -1468,6 +1468,7 @@
     async function loadTopTracks() {
       if (!currentUsername) return;
       const isRecent = periodSelect.value === 'recent';
+      document.getElementById('top-tracks-heading').textContent = isRecent ? '🎵 Recent tracks' : '🎵 Your top tracks';
       topTracksGrid.innerHTML = placeholderState(isRecent ? 'Loading recent tracks...' : 'Loading top tracks...');
       topTracksSection.classList.add('show');
 
@@ -1794,7 +1795,7 @@
             <div class="listening-history-header">
               <span class="stat-icon">📊</span>
               <div>
-                <div class="stat-label">Listening history</div>
+                <div class="stat-label">12 month listening history</div>
               </div>
             </div>
             <div class="listening-history-loading" id="listening-history-loading">
