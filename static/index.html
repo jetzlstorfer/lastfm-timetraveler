@@ -1015,7 +1015,7 @@
         <div class="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <div class="section-eyebrow text-xs font-semibold uppercase tracking-[0.16em]">Current context</div>
-            <div class="section-title mt-2">🎵 Your top tracks</div>
+            <div class="section-title mt-2" id="top-tracks-heading">🎵 Your top tracks</div>
           </div>
           <select class="period-select" id="period-select">
             <option value="7day">Last 7 days</option>
@@ -1024,6 +1024,7 @@
             <option value="6month">Last 6 months</option>
             <option value="12month">Last year</option>
             <option value="overall">All time</option>
+            <option value="recent">Recent tracks</option>
           </select>
         </div>
         <div class="top-tracks-grid" id="top-tracks-grid"></div>
@@ -1466,14 +1467,19 @@
 
     async function loadTopTracks() {
       if (!currentUsername) return;
-      topTracksGrid.innerHTML = placeholderState('Loading top tracks...');
+      const isRecent = periodSelect.value === 'recent';
+      document.getElementById('top-tracks-heading').textContent = isRecent ? '🎵 Recent tracks' : '🎵 Your top tracks';
+      topTracksGrid.innerHTML = placeholderState(isRecent ? 'Loading recent tracks...' : 'Loading top tracks...');
       topTracksSection.classList.add('show');
 
       try {
-        const res = await fetch(`/api/user/top-tracks?username=${encodeURIComponent(currentUsername)}&period=${periodSelect.value}`);
+        const url = isRecent
+          ? `/api/user/recent-tracks?username=${encodeURIComponent(currentUsername)}`
+          : `/api/user/top-tracks?username=${encodeURIComponent(currentUsername)}&period=${periodSelect.value}`;
+        const res = await fetch(url);
         const tracks = await res.json();
         if (!tracks.length) {
-          topTracksGrid.innerHTML = placeholderState('No top tracks for this period.');
+          topTracksGrid.innerHTML = placeholderState(isRecent ? 'No recent tracks found.' : 'No top tracks for this period.');
           return;
         }
 
@@ -1483,7 +1489,7 @@
             <div class="tt-text">
               <div class="tt-name">${escHtml(track.name)}</div>
               <div class="tt-artist">${escHtml(track.artist)}</div>
-              <div class="tt-plays">${track.playcount} plays</div>
+              <div class="tt-plays">${isRecent ? (track.played_at ? `Played: ${track.played_at}` : '') : track.playcount + ' plays'}</div>
             </div>
           </div>
         `).join('');
@@ -1498,7 +1504,7 @@
           });
         });
       } catch {
-        topTracksGrid.innerHTML = placeholderState('Could not load top tracks.');
+        topTracksGrid.innerHTML = placeholderState(isRecent ? 'Could not load recent tracks.' : 'Could not load top tracks.');
       }
     }
 
@@ -1789,7 +1795,7 @@
             <div class="listening-history-header">
               <span class="stat-icon">📊</span>
               <div>
-                <div class="stat-label">Listening history</div>
+                <div class="stat-label">12 month listening history</div>
               </div>
             </div>
             <div class="listening-history-loading" id="listening-history-loading">

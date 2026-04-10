@@ -654,6 +654,41 @@ def user_top_tracks():
         return jsonify([])
 
 
+@app.route("/api/user/recent-tracks")
+def user_recent_tracks():
+    """Get a user's most recently scrobbled tracks."""
+    username = request.args.get("username", "").strip()
+    if not username:
+        return jsonify({"error": "username is required"}), 400
+    try:
+        data = lastfm_get("user.getRecentTracks", user=username, limit=10)
+        tracks = data.get("recenttracks", {}).get("track", [])
+        if isinstance(tracks, dict):
+            tracks = [tracks]
+        results = []
+        for t in tracks:
+            # Skip "now playing" entries which have no timestamp
+            if t.get("@attr", {}).get("nowplaying"):
+                continue
+            artist = t.get("artist", {})
+            artist_name = artist.get("#text", "") if isinstance(artist, dict) else str(artist)
+            image_url = ""
+            for img in t.get("image", []):
+                if img.get("size") == "medium" and img.get("#text") and not is_placeholder(img["#text"]):
+                    image_url = img["#text"]
+            date_info = t.get("date", {})
+            played_at = date_info.get("#text", "") if isinstance(date_info, dict) else ""
+            results.append({
+                "name": t.get("name", ""),
+                "artist": artist_name,
+                "image": image_url,
+                "played_at": played_at,
+            })
+        return jsonify(results)
+    except Exception:
+        return jsonify([])
+
+
 @app.route("/api/on-this-day")
 def on_this_day():
     """Find what the user was listening to on this day 1, 5, and 10 years ago."""
@@ -1286,11 +1321,19 @@ def listening_history():
         return jsonify([])
 
     now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=max_months * 31)
-    cutoff_ts = int(cutoff.timestamp())
+
+    # Build the list of expected months: current month + (max_months - 1) prior
+    expected_months: list[str] = []
+    for i in range(max_months):
+        dt = now.replace(day=1) - timedelta(days=i * 28)
+        expected_months.append(dt.strftime("%Y-%m"))
+    expected_months = sorted(set(expected_months))
+
+    cutoff_dt = datetime.strptime(expected_months[0], "%Y-%m").replace(tzinfo=timezone.utc)
+    cutoff_ts = int(cutoff_dt.timestamp())
 
     # Group chart weeks into calendar months
-    monthly_weeks: dict[str, list[dict]] = {}
+    monthly_weeks: dict[str, list[dict]] = {m: [] for m in expected_months}
     for chart in charts:
         from_ts = int(chart.get("from", 0))
         if from_ts < cutoff_ts:
@@ -1321,13 +1364,46 @@ def listening_history():
             except Exception:
                 pass
 
+    # Supplement with recent tracks for the current incomplete week.
+    # Weekly charts only cover completed weeks, so plays from the current
+    # week (including today) would otherwise be missing.
+    last_chart_to = int(charts[-1].get("to", 0)) if charts else 0
+    current_month_key = now.strftime("%Y-%m")
+    try:
+        recent_data = lastfm_get(
+            "user.getRecentTracks",
+            user=username,
+            limit=200,
+            **{"from": str(last_chart_to), "to": str(int(now.timestamp()))},
+        )
+        recent_tracks = recent_data.get("recenttracks", {}).get("track", [])
+        if isinstance(recent_tracks, dict):
+            recent_tracks = [recent_tracks]
+        for rt in recent_tracks:
+            # Skip the "now playing" entry (has @attr.nowplaying but no date)
+            if rt.get("@attr", {}).get("nowplaying"):
+                continue
+            rt_name = normalize_lastfm_text(rt.get("name", ""))
+            rt_artist = normalize_lastfm_text(extract_artist_name(rt.get("artist")))
+            if rt_name == norm_track and rt_artist == norm_artist:
+                # Determine which month this scrobble belongs to
+                rt_ts = int(rt.get("date", {}).get("uts", 0))
+                if rt_ts:
+                    rt_month = datetime.fromtimestamp(rt_ts, tz=timezone.utc).strftime("%Y-%m")
+                else:
+                    rt_month = current_month_key
+                if rt_month in month_plays:
+                    month_plays[rt_month] += 1
+    except Exception:
+        pass  # Best-effort; chart data is still valid
+
     result = []
-    for month_key in sorted(monthly_weeks.keys()):
+    for month_key in expected_months:
         dt = datetime.strptime(month_key, "%Y-%m")
         result.append({
             "month": month_key,
             "label": dt.strftime("%b %Y"),
-            "plays": month_plays[month_key],
+            "plays": month_plays.get(month_key, 0),
         })
 
     # Store in cache
