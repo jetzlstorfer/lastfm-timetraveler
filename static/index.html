@@ -1754,6 +1754,13 @@
           : '';
         const lookupTime = formatLookupTime(data);
 
+        const artistFirstTs = data.artist_first_listen_timestamp ? Number(data.artist_first_listen_timestamp) : null;
+        const artistFirstObj = artistFirstTs ? new Date(artistFirstTs * 1000) : null;
+        const artistFirstDate = artistFirstObj
+          ? artistFirstObj.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
+          : (data.artist_first_listen_date || '');
+        const artistFirstTrack = data.artist_first_listen_track || '';
+
         const imageSrc = data.image || defaultAlbumArt();
         const resultNeedsArtistFallback = !data.image;
 
@@ -1790,6 +1797,15 @@
                 <div class="stat-value">${data.total_scrobbles.toLocaleString()}</div>
               </div>
             </div>
+            ${artistFirstDate ? `
+            <div class="stat-row">
+              <span class="stat-icon">🎸</span>
+              <div>
+                <div class="stat-label">First discovered ${escHtml(data.artist)}</div>
+                <div class="stat-value">${escHtml(artistFirstDate)}</div>
+                ${artistFirstTrack && artistFirstTrack.toLowerCase() !== data.track.toLowerCase() ? `<div class="stat-note">First track: ${escHtml(artistFirstTrack)}</div>` : ''}
+              </div>
+            </div>` : ''}
           </div>
           <div class="listening-history-section" id="listening-history-section">
             <div class="listening-history-header">

@@ -871,3 +871,155 @@ class TestListeningHistory:
             assert resp2.status_code == 200
             assert api_calls[0] == calls_after_first, "Second request should not trigger new API calls"
             assert resp1.get_json() == resp2.get_json()
+
+
+# ---------------------------------------------------------------------------
+# database.artist_first_listens
+# ---------------------------------------------------------------------------
+
+class TestArtistFirstListenDatabase:
+    def test_get_returns_none_when_not_stored(self):
+        result = database.get_artist_first_listen("testuser", "Unknown Artist")
+        assert result is None
+
+    def test_save_and_retrieve(self):
+        database.save_artist_first_listen(
+            "testuser", "Radiohead",
+            "Creep", "01 Mar 1993, 12:00", "731160000",
+        )
+        row = database.get_artist_first_listen("testuser", "Radiohead")
+        assert row is not None
+        assert row["artist"] == "Radiohead"
+        assert row["first_listen_track"] == "Creep"
+        assert row["first_listen_date"] == "01 Mar 1993, 12:00"
+        assert row["first_listen_timestamp"] == "731160000"
+
+    def test_save_is_case_insensitive(self):
+        database.save_artist_first_listen(
+            "testuser", "Radiohead",
+            "Creep", "01 Mar 1993, 12:00", "731160000",
+        )
+        row = database.get_artist_first_listen("TESTUSER", "radiohead")
+        assert row is not None
+        assert row["first_listen_track"] == "Creep"
+
+    def test_save_updates_existing_record(self):
+        database.save_artist_first_listen(
+            "testuser", "Radiohead",
+            "Creep", "01 Mar 1993, 12:00", "731160000",
+        )
+        database.save_artist_first_listen(
+            "testuser", "Radiohead",
+            "Fake Plastic Trees", "01 Mar 1993, 10:00", "731153200",
+        )
+        row = database.get_artist_first_listen("testuser", "Radiohead")
+        assert row["first_listen_track"] == "Fake Plastic Trees"
+
+    def test_separate_users_isolated(self):
+        database.save_artist_first_listen(
+            "alice", "Radiohead", "Creep", "01 Mar 1993, 12:00", "731160000",
+        )
+        database.save_artist_first_listen(
+            "bob", "Radiohead", "High and Dry", "10 Apr 1993, 12:00", "734356800",
+        )
+        alice_row = database.get_artist_first_listen("alice", "Radiohead")
+        bob_row = database.get_artist_first_listen("bob", "Radiohead")
+        assert alice_row["first_listen_track"] == "Creep"
+        assert bob_row["first_listen_track"] == "High and Dry"
+
+
+# ---------------------------------------------------------------------------
+# /api/artist-first-listen endpoint
+# ---------------------------------------------------------------------------
+
+class TestArtistFirstListenEndpoint:
+    def test_missing_params_returns_400(self, client):
+        resp = client.get("/api/artist-first-listen")
+        assert resp.status_code == 400
+
+        resp = client.get("/api/artist-first-listen?username=testuser")
+        assert resp.status_code == 400
+
+        resp = client.get("/api/artist-first-listen?artist=Radiohead")
+        assert resp.status_code == 400
+
+    @patch.object(app_module, "_find_and_store_artist_first_listen")
+    def test_returns_cached_data(self, mock_find, client):
+        mock_find.return_value = {
+            "first_listen_date": "01 Mar 1993, 12:00",
+            "first_listen_timestamp": "731160000",
+            "first_listen_track": "Creep",
+        }
+        resp = client.get("/api/artist-first-listen?username=testuser&artist=Radiohead")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["artist"] == "Radiohead"
+        assert data["username"] == "testuser"
+        assert data["first_listen_date"] == "01 Mar 1993, 12:00"
+        assert data["first_listen_track"] == "Creep"
+
+    def test_stored_result_served_directly(self, client):
+        database.save_artist_first_listen(
+            "testuser", "Weezer",
+            "Buddy Holly", "10 Jan 2005, 15:00", "1105368000",
+        )
+        with patch.object(app_module, "lastfm_get") as mock_get, \
+             patch.object(app_module, "public_library_artist_first_listen") as mock_lib:
+            resp = client.get("/api/artist-first-listen?username=testuser&artist=Weezer")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["first_listen_date"] == "10 Jan 2005, 15:00"
+        assert data["first_listen_track"] == "Buddy Holly"
+        # Library scraping should be skipped since we already have the data
+        mock_lib.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# artist_first_listen included in first-listen result
+# ---------------------------------------------------------------------------
+
+class TestFirstListenIncludesArtistDiscovery:
+    @patch.object(app_module, "public_library_first_listen_date")
+    @patch.object(app_module, "_find_and_store_artist_first_listen")
+    @patch.object(app_module, "lastfm_get")
+    def test_result_includes_artist_first_listen_fields(
+        self, mock_get, mock_artist_find, mock_public_date, client
+    ):
+        mock_get.return_value = _track_info_response(
+            userplaycount=10, track="Song", artist="Band"
+        )
+        mock_public_date.return_value = "05 Jun 2010, 14:00"
+        mock_artist_find.return_value = {
+            "first_listen_date": "01 Jan 2010, 12:00",
+            "first_listen_timestamp": "1262347200",
+            "first_listen_track": "Old Song",
+        }
+
+        data, status = _await_first_listen(
+            client, "track=Song&artist=Band&username=testuser"
+        )
+
+        assert data["found"] is True
+        assert data["artist_first_listen_date"] == "01 Jan 2010, 12:00"
+        assert data["artist_first_listen_timestamp"] == "1262347200"
+        assert data["artist_first_listen_track"] == "Old Song"
+
+    @patch.object(app_module, "lastfm_get")
+    def test_cache_hit_includes_artist_first_listen_fields(self, mock_get, client):
+        database.save_result(
+            "testuser", "Cached Song", "Cached Artist",
+            "Album", "01 Feb 2015, 10:00", "1422784800", 5, "",
+        )
+        database.save_artist_first_listen(
+            "testuser", "Cached Artist",
+            "First Song Ever", "01 Jan 2015, 08:00", "1420099200",
+        )
+
+        resp = client.get("/api/first-listen?track=Cached+Song&artist=Cached+Artist&username=testuser")
+        data = resp.get_json()
+
+        assert data["found"] is True
+        assert data["cached"] is True
+        assert data["artist_first_listen_date"] == "01 Jan 2015, 08:00"
+        assert data["artist_first_listen_track"] == "First Song Ever"
+        mock_get.assert_not_called()

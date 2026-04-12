@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock, Thread
 from math import ceil
 from datetime import datetime, timezone, timedelta
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 from zoneinfo import ZoneInfo
 import requests
 from flask import Flask, jsonify, request, send_from_directory
@@ -28,6 +28,9 @@ TRACK_PAGE_DATE_RE = re.compile(
     r'<span title="(?:[A-Z][a-z]+ )?([0-9]{1,2} [A-Z][a-z]{2} [0-9]{4}, [0-9]{1,2}:[0-9]{2}(?:am|pm))">'
 )
 TRACK_PAGE_PAGINATION_RE = re.compile(r'href="\?page=(\d+)"')
+# Matches Last.fm library links of the form /music/Artist/_/TrackName.
+# The anchored /music/ prefix and restricted character classes prevent ReDoS.
+TRACK_LINK_IN_ARTIST_PAGE_RE = re.compile(r'href="/music/[^/]+/_/([^"?#/]+)"')
 
 
 # Last.fm returns this hash for the default "star" placeholder — treat as no image
@@ -552,6 +555,154 @@ def lastfm_library_date_to_timestamp(date_text: str) -> str:
     raise ValueError(f"Unsupported Last.fm date format: {date_text}")
 
 
+def public_library_artist_first_listen(
+    username: str,
+    artist: str,
+    total_artist_scrobbles: int,
+) -> tuple[str, str, str] | tuple[None, None, None]:
+    """Scrape the public artist library page and return (date, timestamp, track) of the oldest scrobble.
+
+    Returns ``(None, None, None)`` if the page is unavailable, requires login, or exposes no dates.
+    """
+    base_url = (
+        f"https://www.last.fm/user/{quote(username, safe='')}/library/music/"
+        f"{quote(artist, safe='')}"
+    )
+    headers = {"User-Agent": "lastfm-timetraveler/1.0"}
+    context = lookup_context(username, artist, "")
+
+    app.logger.info(
+        "artist library page lookup started %s total_artist_scrobbles=%s",
+        context,
+        total_artist_scrobbles,
+    )
+
+    resp = requests.get(base_url, headers=headers, timeout=20)
+    if resp.status_code == 404:
+        app.logger.info("artist library page returned 404 %s", context)
+        return None, None, None
+    resp.raise_for_status()
+    if resp.history or "/login" in resp.url:
+        app.logger.info(
+            "artist library page redirected %s final_url=%s", context, resp.url
+        )
+        return None, None, None
+
+    page_count = max(
+        [int(m) for m in TRACK_PAGE_PAGINATION_RE.findall(resp.text)] or [1]
+    )
+    if total_artist_scrobbles > 0:
+        page_count = max(page_count, ceil(total_artist_scrobbles / LIBRARY_PAGE_SIZE))
+    app.logger.info(
+        "artist library page inferred_page_count=%s %s", page_count, context
+    )
+
+    last_page_html = resp.text
+    if page_count > 1:
+        last_page_url = f"{base_url}?page={page_count}"
+        last_resp = requests.get(last_page_url, headers=headers, timeout=20)
+        last_resp.raise_for_status()
+        if last_resp.history or "/login" in last_resp.url:
+            app.logger.info(
+                "artist library page redirected on last page %s final_url=%s",
+                context,
+                last_resp.url,
+            )
+            return None, None, None
+        last_page_html = last_resp.text
+
+    matches = TRACK_PAGE_DATE_RE.findall(last_page_html)
+    if not matches:
+        app.logger.info("artist library page exposed no dated scrobbles %s", context)
+        return None, None, None
+
+    oldest_date = matches[-1]
+    app.logger.info(
+        "artist library page resolved oldest scrobble %s date=%s", context, oldest_date
+    )
+    try:
+        oldest_ts = lastfm_library_date_to_timestamp(oldest_date)
+    except ValueError:
+        app.logger.warning(
+            "artist library page date could not be parsed %s date=%s", context, oldest_date
+        )
+        return None, None, None
+
+    # We also want to capture which track was being listened to at that time.
+    # Extract the track name from the scrobble row nearest the oldest date on that page.
+    track_name = _extract_track_name_near_date(last_page_html, oldest_date)
+
+    return oldest_date, oldest_ts, track_name
+
+
+def _extract_track_name_near_date(html: str, date_text: str) -> str:
+    """Best-effort extraction of the track name adjacent to *date_text* in the HTML.
+
+    The Last.fm library page renders scrobble rows with a track name link followed
+    by a date span.  We look for the last track name that appears before the date.
+    Returns an empty string when the track cannot be identified.
+    """
+    date_pos = html.rfind(date_text)
+    if date_pos == -1:
+        return ""
+    snippet = html[:date_pos]
+    track_matches = TRACK_LINK_IN_ARTIST_PAGE_RE.findall(snippet)
+    if not track_matches:
+        return ""
+    return unquote(track_matches[-1])
+
+
+def _find_and_store_artist_first_listen(username: str, artist: str) -> dict:
+    """Look up (and cache) the first time *username* listened to any track by *artist*.
+
+    Checks the database first; if not found, queries Last.fm for the artist play
+    count then scrapes the artist library page.  The result is always persisted.
+
+    Returns a dict with keys ``first_listen_date``, ``first_listen_timestamp``,
+    ``first_listen_track``.  Values may be empty strings if unavailable.
+    """
+    cached = db.get_artist_first_listen(username, artist)
+    if cached and cached.get("first_listen_date"):
+        return {
+            "first_listen_date": cached["first_listen_date"],
+            "first_listen_timestamp": cached["first_listen_timestamp"],
+            "first_listen_track": cached.get("first_listen_track", ""),
+        }
+
+    total_artist_scrobbles = 0
+    try:
+        artist_info = lastfm_get("artist.getInfo", artist=artist, username=username)
+        stats = artist_info.get("artist", {}).get("stats", {})
+        total_artist_scrobbles = int(stats.get("userplaycount", 0) or 0)
+    except Exception:
+        pass
+
+    date, timestamp, track_name = None, None, ""
+    try:
+        result = public_library_artist_first_listen(
+            username, artist, total_artist_scrobbles
+        )
+        if result[0] is not None:
+            date, timestamp, track_name = result
+    except Exception:
+        app.logger.exception(
+            "artist library page lookup failed user=%r artist=%r", username, artist
+        )
+
+    db.save_artist_first_listen(
+        username=username,
+        artist=artist,
+        first_listen_track=track_name or "",
+        first_listen_date=date or "",
+        first_listen_timestamp=timestamp or "",
+    )
+    return {
+        "first_listen_date": date or "",
+        "first_listen_timestamp": timestamp or "",
+        "first_listen_track": track_name or "",
+    }
+
+
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
@@ -1020,6 +1171,10 @@ def _do_first_listen_lookup(
         total,
         image_url,
     )
+
+    # Look up (and cache) when this artist was first heard by the user
+    artist_first = _find_and_store_artist_first_listen(username, canonical_artist)
+
     app.logger.info(
         "lookup finished %s date_found=%s cached=%s elapsed_ms=%s",
         lookup_context(username, canonical_artist, canonical_track),
@@ -1055,6 +1210,9 @@ def _do_first_listen_lookup(
             "date_unavailable_reason": date_unavailable_reason,
             "cached": False,
             "elapsed_ms": elapsed_ms(),
+            "artist_first_listen_date": artist_first["first_listen_date"],
+            "artist_first_listen_timestamp": artist_first["first_listen_timestamp"],
+            "artist_first_listen_track": artist_first["first_listen_track"],
         },
     )
 
@@ -1114,10 +1272,17 @@ def first_listen():
             cached["total_scrobbles"] or 0,
             cached["image"] or "",
         )
+        cached_artist = cached["artist"]
+        artist_first = db.get_artist_first_listen(username, cached_artist) or {}
+        artist_first_result = {
+            "artist_first_listen_date": artist_first.get("first_listen_date", ""),
+            "artist_first_listen_timestamp": artist_first.get("first_listen_timestamp", ""),
+            "artist_first_listen_track": artist_first.get("first_listen_track", ""),
+        }
         finish_lookup_progress(
             lookup_id,
             username=username,
-            artist=cached["artist"],
+            artist=cached_artist,
             track=cached["track"],
             stage="cache-hit",
             status="Loaded from cache",
@@ -1127,7 +1292,7 @@ def first_listen():
             result={
                 "found": True,
                 "track": cached["track"],
-                "artist": cached["artist"],
+                "artist": cached_artist,
                 "album": cached["album"] or "",
                 "date": cached_date,
                 "timestamp": cached_timestamp,
@@ -1141,13 +1306,14 @@ def first_listen():
                 ),
                 "cached": True,
                 "elapsed_ms": elapsed_ms(),
+                **artist_first_result,
             },
         )
         return jsonify(
             {
                 "found": True,
                 "track": cached["track"],
-                "artist": cached["artist"],
+                "artist": cached_artist,
                 "album": cached["album"] or "",
                 "date": cached_date,
                 "timestamp": cached_timestamp,
@@ -1161,6 +1327,7 @@ def first_listen():
                 ),
                 "cached": True,
                 "elapsed_ms": elapsed_ms(),
+                **artist_first_result,
             }
         )
 
@@ -1241,6 +1408,32 @@ def history():
             }
             for r in results
         ]
+    )
+
+
+@app.route("/api/artist-first-listen")
+def artist_first_listen():
+    """Return the earliest known scrobble of any track by *artist* for the given user.
+
+    If the result is already cached in the database it is returned immediately.
+    Otherwise a live lookup against the Last.fm public library page is performed
+    and the result is stored for future calls.
+    """
+    username = request.args.get("username", "").strip()
+    artist = request.args.get("artist", "").strip()
+
+    if not username or not artist:
+        return jsonify({"error": "username and artist are required"}), 400
+
+    result = _find_and_store_artist_first_listen(username, artist)
+    return jsonify(
+        {
+            "artist": artist,
+            "username": username,
+            "first_listen_date": result["first_listen_date"],
+            "first_listen_timestamp": result["first_listen_timestamp"],
+            "first_listen_track": result["first_listen_track"],
+        }
     )
 
 

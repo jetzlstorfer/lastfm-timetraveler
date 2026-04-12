@@ -54,6 +54,15 @@ def _cache_item_id(username: str, track: str, artist: str) -> str:
     )
 
 
+def _artist_first_listen_item_id(username: str, artist: str) -> str:
+    return "artist_first_listen|" + "|".join(
+        [
+            _normalize_lookup_value(username),
+            _normalize_lookup_value(artist),
+        ]
+    )
+
+
 def _use_cosmos_backend() -> bool:
     return bool(_cosmos_connection_string() or (_cosmos_endpoint() and _cosmos_key()))
 
@@ -116,6 +125,25 @@ def _create_sqlite_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_searches_user_track_artist
         ON searches (LOWER(username), LOWER(track), LOWER(artist))
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS artist_first_listens (
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+            username                TEXT    NOT NULL,
+            artist                  TEXT    NOT NULL,
+            first_listen_track      TEXT,
+            first_listen_date       TEXT,
+            first_listen_timestamp  TEXT,
+            queried_at              TEXT    NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_artist_first_listens_user_artist
+        ON artist_first_listens (LOWER(username), LOWER(artist))
         """
     )
     conn.commit()
@@ -203,6 +231,41 @@ def _record_from_cosmos_item(item: dict | None) -> dict | None:
         "first_listen_timestamp": item.get("first_listen_timestamp", ""),
         "total_scrobbles": item.get("total_scrobbles", 0),
         "image": item.get("image", ""),
+        "queried_at": item.get("queried_at", ""),
+    }
+
+
+def _cosmos_artist_first_listen_item(
+    username: str,
+    artist: str,
+    first_listen_track: str,
+    first_listen_date: str,
+    first_listen_timestamp: str,
+) -> dict:
+    return {
+        "id": _artist_first_listen_item_id(username, artist),
+        "type": "artist_first_listen",
+        "username": username,
+        "username_normalized": _normalize_lookup_value(username),
+        "artist": artist,
+        "artist_normalized": _normalize_lookup_value(artist),
+        "first_listen_track": first_listen_track,
+        "first_listen_date": first_listen_date,
+        "first_listen_timestamp": first_listen_timestamp,
+        "queried_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _artist_first_listen_record_from_cosmos_item(item: dict | None) -> dict | None:
+    if not item:
+        return None
+    return {
+        "id": item.get("id"),
+        "username": item.get("username", ""),
+        "artist": item.get("artist", ""),
+        "first_listen_track": item.get("first_listen_track", ""),
+        "first_listen_date": item.get("first_listen_date", ""),
+        "first_listen_timestamp": item.get("first_listen_timestamp", ""),
         "queried_at": item.get("queried_at", ""),
     }
 
@@ -318,6 +381,69 @@ def _sqlite_get_history(username: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _sqlite_get_artist_first_listen(username: str, artist: str) -> dict | None:
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM artist_first_listens
+            WHERE LOWER(username) = LOWER(?)
+              AND LOWER(artist)   = LOWER(?)
+            """,
+            (username, artist),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def _sqlite_save_artist_first_listen(
+    username: str,
+    artist: str,
+    first_listen_track: str,
+    first_listen_date: str,
+    first_listen_timestamp: str,
+) -> None:
+    _sqlite_init_db()
+    queried_at = datetime.now(timezone.utc).isoformat()
+    existing = _sqlite_get_artist_first_listen(username, artist)
+    with _sqlite_connect() as conn:
+        if existing:
+            conn.execute(
+                """
+                UPDATE artist_first_listens
+                SET first_listen_track     = ?,
+                    first_listen_date      = ?,
+                    first_listen_timestamp = ?,
+                    queried_at             = ?
+                WHERE id = ?
+                """,
+                (
+                    first_listen_track,
+                    first_listen_date,
+                    first_listen_timestamp,
+                    queried_at,
+                    existing["id"],
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO artist_first_listens
+                    (username, artist, first_listen_track,
+                     first_listen_date, first_listen_timestamp, queried_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    username,
+                    artist,
+                    first_listen_track,
+                    first_listen_date,
+                    first_listen_timestamp,
+                    queried_at,
+                ),
+            )
+        conn.commit()
+
+
 def _cosmos_init_db() -> None:
     _get_cosmos_container()
 
@@ -370,6 +496,36 @@ def _cosmos_get_history(username: str) -> list[dict]:
         enable_cross_partition_query=False,
     )
     return [_record_from_cosmos_item(item) for item in items]
+
+
+def _cosmos_get_artist_first_listen(username: str, artist: str) -> dict | None:
+    container = _get_cosmos_container()
+    item_id = _artist_first_listen_item_id(username, artist)
+    partition_key = _normalize_lookup_value(username)
+    try:
+        item = container.read_item(item=item_id, partition_key=partition_key)
+    except cosmos_exceptions.CosmosResourceNotFoundError:
+        return None
+    return _artist_first_listen_record_from_cosmos_item(item)
+
+
+def _cosmos_save_artist_first_listen(
+    username: str,
+    artist: str,
+    first_listen_track: str,
+    first_listen_date: str,
+    first_listen_timestamp: str,
+) -> None:
+    container = _get_cosmos_container()
+    container.upsert_item(
+        _cosmos_artist_first_listen_item(
+            username=username,
+            artist=artist,
+            first_listen_track=first_listen_track,
+            first_listen_date=first_listen_date,
+            first_listen_timestamp=first_listen_timestamp,
+        )
+    )
 
 
 def init_db() -> None:
@@ -427,3 +583,36 @@ def get_history(username: str) -> list[dict]:
     if _use_cosmos_backend():
         return _cosmos_get_history(username)
     return _sqlite_get_history(username)
+
+
+def get_artist_first_listen(username: str, artist: str) -> dict | None:
+    """Return the stored artist first-listen record for *(username, artist)*, or ``None``."""
+    if _use_cosmos_backend():
+        return _cosmos_get_artist_first_listen(username, artist)
+    return _sqlite_get_artist_first_listen(username, artist)
+
+
+def save_artist_first_listen(
+    username: str,
+    artist: str,
+    first_listen_track: str,
+    first_listen_date: str,
+    first_listen_timestamp: str,
+) -> None:
+    """Insert or update an artist first-listen record in the configured backend."""
+    if _use_cosmos_backend():
+        _cosmos_save_artist_first_listen(
+            username=username,
+            artist=artist,
+            first_listen_track=first_listen_track,
+            first_listen_date=first_listen_date,
+            first_listen_timestamp=first_listen_timestamp,
+        )
+        return
+    _sqlite_save_artist_first_listen(
+        username=username,
+        artist=artist,
+        first_listen_track=first_listen_track,
+        first_listen_date=first_listen_date,
+        first_listen_timestamp=first_listen_timestamp,
+    )
