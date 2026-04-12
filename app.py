@@ -1222,9 +1222,6 @@ def _do_first_listen_lookup(
         image_url,
     )
 
-    # Look up (and cache) when this artist was first heard by the user
-    artist_first = _find_and_store_artist_first_listen(username, canonical_artist)
-
     app.logger.info(
         "lookup finished %s date_found=%s cached=%s elapsed_ms=%s",
         lookup_context(username, canonical_artist, canonical_track),
@@ -1260,9 +1257,6 @@ def _do_first_listen_lookup(
             "date_unavailable_reason": date_unavailable_reason,
             "cached": False,
             "elapsed_ms": elapsed_ms(),
-            "artist_first_listen_date": artist_first["first_listen_date"],
-            "artist_first_listen_timestamp": artist_first["first_listen_timestamp"],
-            "artist_first_listen_track": artist_first["first_listen_track"],
         },
     )
 
@@ -1324,18 +1318,6 @@ def first_listen():
         )
         cached_artist = cached["artist"]
 
-        # Check if artist first-listen is already cached
-        artist_first_cached = db.get_artist_first_listen(username, cached_artist)
-        artist_first_result = {}
-        if artist_first_cached and artist_first_cached.get("first_listen_date"):
-            # Include cached artist data immediately if available
-            artist_first_result = {
-                "artist_first_listen_date": artist_first_cached.get("first_listen_date", ""),
-                "artist_first_listen_timestamp": artist_first_cached.get("first_listen_timestamp", ""),
-                "artist_first_listen_track": artist_first_cached.get("first_listen_track", ""),
-            }
-        # Otherwise, omit the fields and let the UI fetch them asynchronously
-
         finish_lookup_progress(
             lookup_id,
             username=username,
@@ -1363,7 +1345,6 @@ def first_listen():
                 ),
                 "cached": True,
                 "elapsed_ms": elapsed_ms(),
-                **artist_first_result,
             },
         )
         return jsonify(
@@ -1384,7 +1365,6 @@ def first_listen():
                 ),
                 "cached": True,
                 "elapsed_ms": elapsed_ms(),
-                **artist_first_result,
             }
         )
 

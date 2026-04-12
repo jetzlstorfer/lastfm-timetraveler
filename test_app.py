@@ -987,37 +987,31 @@ class TestArtistFirstListenEndpoint:
 
 
 # ---------------------------------------------------------------------------
-# artist_first_listen included in first-listen result
+# artist_first_listen is fetched asynchronously (not included in first-listen result)
 # ---------------------------------------------------------------------------
 
-class TestFirstListenIncludesArtistDiscovery:
+class TestFirstListenExcludesArtistDiscovery:
     @patch.object(app_module, "public_library_first_listen_date")
-    @patch.object(app_module, "_find_and_store_artist_first_listen")
     @patch.object(app_module, "lastfm_get")
-    def test_result_includes_artist_first_listen_fields(
-        self, mock_get, mock_artist_find, mock_public_date, client
+    def test_result_omits_artist_first_listen_fields(
+        self, mock_get, mock_public_date, client
     ):
         mock_get.return_value = _track_info_response(
             userplaycount=10, track="Song", artist="Band"
         )
         mock_public_date.return_value = "05 Jun 2010, 14:00"
-        mock_artist_find.return_value = {
-            "first_listen_date": "01 Jan 2010, 12:00",
-            "first_listen_timestamp": "1262347200",
-            "first_listen_track": "Old Song",
-        }
 
         data, status = _await_first_listen(
             client, "track=Song&artist=Band&username=testuser"
         )
 
         assert data["found"] is True
-        assert data["artist_first_listen_date"] == "01 Jan 2010, 12:00"
-        assert data["artist_first_listen_timestamp"] == "1262347200"
-        assert data["artist_first_listen_track"] == "Old Song"
+        assert "artist_first_listen_date" not in data
+        assert "artist_first_listen_timestamp" not in data
+        assert "artist_first_listen_track" not in data
 
     @patch.object(app_module, "lastfm_get")
-    def test_cache_hit_includes_artist_first_listen_fields(self, mock_get, client):
+    def test_cache_hit_omits_artist_first_listen_fields(self, mock_get, client):
         database.save_result(
             "testuser", "Cached Song", "Cached Artist",
             "Album", "01 Feb 2015, 10:00", "1422784800", 5, "",
@@ -1032,27 +1026,7 @@ class TestFirstListenIncludesArtistDiscovery:
 
         assert data["found"] is True
         assert data["cached"] is True
-        assert data["artist_first_listen_date"] == "01 Jan 2015, 08:00"
-        assert data["artist_first_listen_track"] == "First Song Ever"
-        mock_get.assert_not_called()
-
-    @patch.object(app_module, "lastfm_get")
-    def test_cache_hit_without_artist_cache_omits_artist_fields(self, mock_get, client):
-        """When track is cached but artist first-listen is NOT cached, omit artist fields for async fetch."""
-        database.save_result(
-            "testuser", "Cached Song", "Cached Artist",
-            "Album", "01 Feb 2015, 10:00", "1422784800", 5, "",
-        )
-        # Deliberately NOT saving artist first-listen to cache
-
-        resp = client.get("/api/first-listen?track=Cached+Song&artist=Cached+Artist&username=testuser")
-        data = resp.get_json()
-
-        assert data["found"] is True
-        assert data["cached"] is True
-        # Artist first-listen fields should be omitted (not present in response)
         assert "artist_first_listen_date" not in data
         assert "artist_first_listen_timestamp" not in data
         assert "artist_first_listen_track" not in data
-        # No API calls should be made for the track (it's cached)
         mock_get.assert_not_called()

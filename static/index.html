@@ -589,6 +589,18 @@
       line-height: 1.55;
     }
 
+    .artist-first-track-link {
+      color: #e7e5e4;
+      text-decoration: underline;
+      text-decoration-color: rgba(231, 229, 228, 0.4);
+      text-underline-offset: 2px;
+      cursor: pointer;
+      transition: text-decoration-color 0.15s;
+    }
+    .artist-first-track-link:hover {
+      text-decoration-color: rgba(231, 229, 228, 0.9);
+    }
+
     .not-found {
       padding: 1.5rem;
       color: #d6d3d1;
@@ -1754,13 +1766,6 @@
           : '';
         const lookupTime = formatLookupTime(data);
 
-        const artistFirstTs = data.artist_first_listen_timestamp ? Number(data.artist_first_listen_timestamp) : null;
-        const artistFirstObj = artistFirstTs ? new Date(artistFirstTs * 1000) : null;
-        const artistFirstDate = artistFirstObj
-          ? artistFirstObj.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
-          : (data.artist_first_listen_date || '');
-        const artistFirstTrack = data.artist_first_listen_track || '';
-
         const imageSrc = data.image || defaultAlbumArt();
         const resultNeedsArtistFallback = !data.image;
 
@@ -1800,17 +1805,11 @@
             <div class="stat-row" id="artist-first-listen-section">
               <span class="stat-icon">🎸</span>
               <div id="artist-first-listen-content">
-                ${artistFirstDate ? `
-                <div class="stat-label">First discovered ${escHtml(data.artist)}</div>
-                <div class="stat-value">${escHtml(artistFirstDate)}</div>
-                ${artistFirstTrack && artistFirstTrack.toLowerCase() !== data.track.toLowerCase() ? `<div class="stat-note">First track: ${escHtml(artistFirstTrack)}</div>` : ''}
-                ` : `
                 <div class="stat-label">First discovered ${escHtml(data.artist)}</div>
                 <div class="stat-value" style="color:#78716c">
                   <div class="spinner" style="width:16px;height:16px;display:inline-block;vertical-align:middle"></div>
                   <span style="vertical-align:middle;margin-left:8px">Loading…</span>
                 </div>
-                `}
               </div>
             </div>
           </div>
@@ -1835,7 +1834,7 @@
         if (resultNeedsArtistFallback) {
           applyArtistFallback(document.getElementById('result-art'), data.artist);
         }
-        fetchAndRenderArtistFirstListen(data.artist, artistFirstDate);
+        fetchAndRenderArtistFirstListen(data.artist);
         fetchAndRenderListeningHistory(data.track, data.artist);
         loadRecentSearches();
       } catch {
@@ -1945,10 +1944,7 @@
       }
     }
 
-    async function fetchAndRenderArtistFirstListen(artist, artistFirstDate) {
-      // If we already have the artist first-listen data, no need to fetch
-      if (artistFirstDate) return;
-
+    async function fetchAndRenderArtistFirstListen(artist) {
       const contentEl = document.getElementById('artist-first-listen-content');
       if (!contentEl || !currentUsername) return;
 
@@ -1973,8 +1969,15 @@
           contentEl.innerHTML = `
             <div class="stat-label">First discovered ${escHtml(artist)}</div>
             <div class="stat-value">${escHtml(formattedDate)}</div>
-            ${artistFirstTrack ? `<div class="stat-note">First track: ${escHtml(artistFirstTrack)}</div>` : ''}
+            ${artistFirstTrack ? `<div class="stat-note">First track: <a href="#" class="artist-first-track-link" data-track="${escAttr(artistFirstTrack)}" data-artist="${escAttr(artist)}">${escHtml(artistFirstTrack)}</a></div>` : ''}
           `;
+          const link = contentEl.querySelector('.artist-first-track-link');
+          if (link) {
+            link.addEventListener('click', (e) => {
+              e.preventDefault();
+              selectResult({ name: link.dataset.track, artist: link.dataset.artist });
+            });
+          }
         } else {
           contentEl.innerHTML = '<div class="stat-label">First discovered ' + escHtml(artist) + '</div><div class="stat-value" style="color:#78716c">Not available</div>';
         }
