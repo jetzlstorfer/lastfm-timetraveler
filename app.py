@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock, Thread
 from math import ceil
 from datetime import datetime, timezone, timedelta
-from urllib.parse import quote
+from urllib.parse import quote, unquote_plus
 from zoneinfo import ZoneInfo
 import requests
 from flask import Flask, jsonify, request, send_from_directory
@@ -29,8 +29,8 @@ TRACK_PAGE_DATE_RE = re.compile(
 )
 TRACK_PAGE_PAGINATION_RE = re.compile(r'href="\?page=(\d+)"')
 # Matches Last.fm library links of the form /music/Artist/_/TrackName.
-# The lazy quantifier before /_/ prevents catastrophic backtracking.
-TRACK_LINK_IN_ARTIST_PAGE_RE = re.compile(r'href="[^"]*?/_/([^"?#]+)"')
+# The anchored /music/ prefix and restricted character classes prevent ReDoS.
+TRACK_LINK_IN_ARTIST_PAGE_RE = re.compile(r'href="/music/[^/]+/_/([^"?#/]+)"')
 
 
 # Last.fm returns this hash for the default "star" placeholder — treat as no image
@@ -642,7 +642,6 @@ def _extract_track_name_near_date(html: str, date_text: str) -> str:
     by a date span.  We look for the last track name that appears before the date.
     Returns an empty string when the track cannot be identified.
     """
-    from urllib.parse import unquote
     date_pos = html.rfind(date_text)
     if date_pos == -1:
         return ""
@@ -650,7 +649,7 @@ def _extract_track_name_near_date(html: str, date_text: str) -> str:
     track_matches = TRACK_LINK_IN_ARTIST_PAGE_RE.findall(snippet)
     if not track_matches:
         return ""
-    return unquote(track_matches[-1].replace("+", " "))
+    return unquote_plus(track_matches[-1])
 
 
 def _find_and_store_artist_first_listen(username: str, artist: str) -> dict:
