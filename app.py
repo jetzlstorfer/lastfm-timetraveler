@@ -555,14 +555,59 @@ def lastfm_library_date_to_timestamp(date_text: str) -> str:
     raise ValueError(f"Unsupported Last.fm date format: {date_text}")
 
 
+def _oldest_scrobble_on_track_page(
+    username: str,
+    artist: str,
+    track_name_encoded: str,
+    headers: dict,
+) -> tuple[str, str] | tuple[None, None]:
+    """Fetch the per-track scrobble page and return (date, timestamp) of the oldest scrobble."""
+    track_url = (
+        f"https://www.last.fm/user/{quote(username, safe='')}/library/music/"
+        f"{quote(artist, safe='')}/_/{track_name_encoded}"
+    )
+    resp = requests.get(track_url, headers=headers, timeout=20)
+    if resp.status_code != 200 or "/login" in resp.url:
+        return None, None
+
+    track_page_count = max(
+        [int(m) for m in TRACK_PAGE_PAGINATION_RE.findall(resp.text)] or [1]
+    )
+    last_page_html = resp.text
+    if track_page_count > 1:
+        last_resp = requests.get(
+            f"{track_url}?page={track_page_count}", headers=headers, timeout=20
+        )
+        if last_resp.status_code == 200 and "/login" not in last_resp.url:
+            last_page_html = last_resp.text
+
+    dates = TRACK_PAGE_DATE_RE.findall(last_page_html)
+    if not dates:
+        return None, None
+
+    oldest_date = dates[-1]
+    try:
+        oldest_ts = lastfm_library_date_to_timestamp(oldest_date)
+    except ValueError:
+        return None, None
+    return oldest_date, oldest_ts
+
+
 def public_library_artist_first_listen(
     username: str,
     artist: str,
     total_artist_scrobbles: int,
 ) -> tuple[str, str, str] | tuple[None, None, None]:
-    """Scrape the public artist library page and return (date, timestamp, track) of the oldest scrobble.
+    """Find the oldest scrobble of *artist* by checking per-track scrobble pages.
 
-    Returns ``(None, None, None)`` if the page is unavailable, requires login, or exposes no dates.
+    The artist library page (``/user/{u}/library/music/{a}``) lists the user's
+    tracks for an artist ordered by play count but does **not** expose individual
+    scrobble timestamps.  Per-track pages (``…/_/{track}``) *do* show timestamps,
+    so this function collects the track list and then checks per-track pages —
+    prioritising the least-played tracks which are more likely to include the
+    very first listen.
+
+    Returns ``(date, timestamp, track_name)`` or ``(None, None, None)``.
     """
     base_url = (
         f"https://www.last.fm/user/{quote(username, safe='')}/library/music/"
@@ -572,7 +617,7 @@ def public_library_artist_first_listen(
     context = lookup_context(username, artist, "")
 
     app.logger.info(
-        "artist library page lookup started %s total_artist_scrobbles=%s",
+        "artist first-listen lookup started %s total_artist_scrobbles=%s",
         context,
         total_artist_scrobbles,
     )
@@ -588,68 +633,73 @@ def public_library_artist_first_listen(
         )
         return None, None, None
 
+    # Collect track names from all pages of the artist library (ordered most→least played).
+    all_track_names: list[str] = list(
+        dict.fromkeys(TRACK_LINK_IN_ARTIST_PAGE_RE.findall(resp.text))
+    )
+
     page_count = max(
         [int(m) for m in TRACK_PAGE_PAGINATION_RE.findall(resp.text)] or [1]
     )
-    if total_artist_scrobbles > 0:
-        page_count = max(page_count, ceil(total_artist_scrobbles / LIBRARY_PAGE_SIZE))
-    app.logger.info(
-        "artist library page inferred_page_count=%s %s", page_count, context
-    )
-
-    last_page_html = resp.text
-    if page_count > 1:
-        last_page_url = f"{base_url}?page={page_count}"
-        last_resp = requests.get(last_page_url, headers=headers, timeout=20)
-        last_resp.raise_for_status()
-        if "/login" in last_resp.url:
-            app.logger.info(
-                "artist library page redirected to login on last page %s final_url=%s",
-                context,
-                last_resp.url,
-            )
-            return None, None, None
-        last_page_html = last_resp.text
-
-    matches = TRACK_PAGE_DATE_RE.findall(last_page_html)
-    if not matches:
-        app.logger.info("artist library page exposed no dated scrobbles %s", context)
-        return None, None, None
-
-    oldest_date = matches[-1]
-    app.logger.info(
-        "artist library page resolved oldest scrobble %s date=%s", context, oldest_date
-    )
-    try:
-        oldest_ts = lastfm_library_date_to_timestamp(oldest_date)
-    except ValueError:
-        app.logger.warning(
-            "artist library page date could not be parsed %s date=%s", context, oldest_date
+    # Fetch remaining pages to gather more track names.
+    for page_num in range(2, page_count + 1):
+        page_resp = requests.get(
+            f"{base_url}?page={page_num}", headers=headers, timeout=20
         )
+        if page_resp.status_code != 200 or "/login" in page_resp.url:
+            break
+        for t in TRACK_LINK_IN_ARTIST_PAGE_RE.findall(page_resp.text):
+            if t not in dict.fromkeys(all_track_names):
+                all_track_names.append(t)
+
+    if not all_track_names:
+        app.logger.info("artist library page listed no tracks %s", context)
         return None, None, None
 
-    # We also want to capture which track was being listened to at that time.
-    # Extract the track name from the scrobble row nearest the oldest date on that page.
-    track_name = _extract_track_name_near_date(last_page_html, oldest_date)
+    app.logger.info(
+        "artist first-listen checking per-track pages %s tracks_found=%s",
+        context,
+        len(all_track_names),
+    )
 
-    return oldest_date, oldest_ts, track_name
+    # Check per-track scrobble pages.  Prioritise the least-played tracks
+    # (end of the list) because they are more likely to include the oldest listen,
+    # but also include a few of the most-played tracks.  Cap total requests.
+    MAX_TRACK_CHECKS = 10
+    candidates: list[str] = []
+    # Least-played first (reversed tail)
+    candidates.extend(reversed(all_track_names))
+    # Add most-played that aren't already included
+    for t in all_track_names:
+        if t not in candidates:
+            candidates.append(t)
+    candidates = candidates[:MAX_TRACK_CHECKS]
 
+    best_date: str | None = None
+    best_ts: str | None = None
+    best_track: str = ""
 
-def _extract_track_name_near_date(html: str, date_text: str) -> str:
-    """Best-effort extraction of the track name adjacent to *date_text* in the HTML.
+    for track_encoded in candidates:
+        date, ts = _oldest_scrobble_on_track_page(
+            username, artist, track_encoded, headers
+        )
+        if date and ts:
+            if best_ts is None or int(ts) < int(best_ts):
+                best_date = date
+                best_ts = ts
+                best_track = unquote(track_encoded.replace("+", " "))
 
-    The Last.fm library page renders scrobble rows with a track name link followed
-    by a date span.  We look for the last track name that appears before the date.
-    Returns an empty string when the track cannot be identified.
-    """
-    date_pos = html.rfind(date_text)
-    if date_pos == -1:
-        return ""
-    snippet = html[:date_pos]
-    track_matches = TRACK_LINK_IN_ARTIST_PAGE_RE.findall(snippet)
-    if not track_matches:
-        return ""
-    return unquote(track_matches[-1])
+    if best_date:
+        app.logger.info(
+            "artist first-listen resolved %s date=%s track=%s",
+            context,
+            best_date,
+            best_track,
+        )
+        return best_date, best_ts, best_track
+
+    app.logger.info("artist first-listen found no dated scrobbles %s", context)
+    return None, None, None
 
 
 def _find_and_store_artist_first_listen(username: str, artist: str) -> dict:
