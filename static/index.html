@@ -1797,15 +1797,22 @@
                 <div class="stat-value">${data.total_scrobbles.toLocaleString()}</div>
               </div>
             </div>
-            ${artistFirstDate ? `
-            <div class="stat-row">
+            <div class="stat-row" id="artist-first-listen-section">
               <span class="stat-icon">🎸</span>
-              <div>
+              <div id="artist-first-listen-content">
+                ${artistFirstDate ? `
                 <div class="stat-label">First discovered ${escHtml(data.artist)}</div>
                 <div class="stat-value">${escHtml(artistFirstDate)}</div>
                 ${artistFirstTrack && artistFirstTrack.toLowerCase() !== data.track.toLowerCase() ? `<div class="stat-note">First track: ${escHtml(artistFirstTrack)}</div>` : ''}
+                ` : `
+                <div class="stat-label">First discovered ${escHtml(data.artist)}</div>
+                <div class="stat-value" style="color:#78716c">
+                  <div class="spinner" style="width:16px;height:16px;display:inline-block;vertical-align:middle"></div>
+                  <span style="vertical-align:middle;margin-left:8px">Loading…</span>
+                </div>
+                `}
               </div>
-            </div>` : ''}
+            </div>
           </div>
           <div class="listening-history-section" id="listening-history-section">
             <div class="listening-history-header">
@@ -1828,6 +1835,7 @@
         if (resultNeedsArtistFallback) {
           applyArtistFallback(document.getElementById('result-art'), data.artist);
         }
+        fetchAndRenderArtistFirstListen(data.artist, artistFirstDate);
         fetchAndRenderListeningHistory(data.track, data.artist);
         loadRecentSearches();
       } catch {
@@ -1933,6 +1941,47 @@
         console.error('[listening-history:error]', err);
         if (loadingEl) {
           loadingEl.innerHTML = '<span style="color:#78716c">Could not load listening history.</span>';
+        }
+      }
+    }
+
+    async function fetchAndRenderArtistFirstListen(artist, artistFirstDate) {
+      // If we already have the artist first-listen data, no need to fetch
+      if (artistFirstDate) return;
+
+      const contentEl = document.getElementById('artist-first-listen-content');
+      if (!contentEl || !currentUsername) return;
+
+      try {
+        const url = `/api/artist-first-listen?username=${encodeURIComponent(currentUsername)}&artist=${encodeURIComponent(artist)}`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        if (data.error) {
+          contentEl.innerHTML = '<div class="stat-label">First discovered ' + escHtml(artist) + '</div><div class="stat-value" style="color:#78716c">Not available</div>';
+          return;
+        }
+
+        const artistFirstTs = data.first_listen_timestamp ? Number(data.first_listen_timestamp) : null;
+        const artistFirstObj = artistFirstTs ? new Date(artistFirstTs * 1000) : null;
+        const formattedDate = artistFirstObj
+          ? artistFirstObj.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
+          : (data.first_listen_date || '');
+        const artistFirstTrack = data.first_listen_track || '';
+
+        if (formattedDate) {
+          contentEl.innerHTML = `
+            <div class="stat-label">First discovered ${escHtml(artist)}</div>
+            <div class="stat-value">${escHtml(formattedDate)}</div>
+            ${artistFirstTrack ? `<div class="stat-note">First track: ${escHtml(artistFirstTrack)}</div>` : ''}
+          `;
+        } else {
+          contentEl.innerHTML = '<div class="stat-label">First discovered ' + escHtml(artist) + '</div><div class="stat-value" style="color:#78716c">Not available</div>';
+        }
+      } catch (err) {
+        console.error('[artist-first-listen:error]', err);
+        if (contentEl) {
+          contentEl.innerHTML = '<div class="stat-label">First discovered ' + escHtml(artist) + '</div><div class="stat-value" style="color:#78716c">Could not load</div>';
         }
       }
     }
