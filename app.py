@@ -582,9 +582,9 @@ def public_library_artist_first_listen(
         app.logger.info("artist library page returned 404 %s", context)
         return None, None, None
     resp.raise_for_status()
-    if resp.history or "/login" in resp.url:
+    if "/login" in resp.url:
         app.logger.info(
-            "artist library page redirected %s final_url=%s", context, resp.url
+            "artist library page redirected to login %s final_url=%s", context, resp.url
         )
         return None, None, None
 
@@ -602,9 +602,9 @@ def public_library_artist_first_listen(
         last_page_url = f"{base_url}?page={page_count}"
         last_resp = requests.get(last_page_url, headers=headers, timeout=20)
         last_resp.raise_for_status()
-        if last_resp.history or "/login" in last_resp.url:
+        if "/login" in last_resp.url:
             app.logger.info(
-                "artist library page redirected on last page %s final_url=%s",
+                "artist library page redirected to login on last page %s final_url=%s",
                 context,
                 last_resp.url,
             )
