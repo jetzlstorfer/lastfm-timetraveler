@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock, Thread
 from math import ceil
 from datetime import datetime, timezone, timedelta
-from urllib.parse import quote, unquote_plus
+from urllib.parse import quote, unquote
 from zoneinfo import ZoneInfo
 import requests
 from flask import Flask, jsonify, request, send_from_directory
@@ -602,7 +602,7 @@ def public_library_artist_first_listen(
         last_page_url = f"{base_url}?page={page_count}"
         last_resp = requests.get(last_page_url, headers=headers, timeout=20)
         last_resp.raise_for_status()
-        if last_resp.history or "/login" in last_resp.url or last_resp.url != last_page_url:
+        if last_resp.history or "/login" in last_resp.url:
             app.logger.info(
                 "artist library page redirected on last page %s final_url=%s",
                 context,
@@ -649,7 +649,7 @@ def _extract_track_name_near_date(html: str, date_text: str) -> str:
     track_matches = TRACK_LINK_IN_ARTIST_PAGE_RE.findall(snippet)
     if not track_matches:
         return ""
-    return unquote_plus(track_matches[-1])
+    return unquote(track_matches[-1])
 
 
 def _find_and_store_artist_first_listen(username: str, artist: str) -> dict:
