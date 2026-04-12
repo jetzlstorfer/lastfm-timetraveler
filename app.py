@@ -28,6 +28,9 @@ TRACK_PAGE_DATE_RE = re.compile(
     r'<span title="(?:[A-Z][a-z]+ )?([0-9]{1,2} [A-Z][a-z]{2} [0-9]{4}, [0-9]{1,2}:[0-9]{2}(?:am|pm))">'
 )
 TRACK_PAGE_PAGINATION_RE = re.compile(r'href="\?page=(\d+)"')
+# Matches Last.fm library links of the form /music/Artist/_/TrackName.
+# The lazy quantifier before /_/ prevents catastrophic backtracking.
+TRACK_LINK_IN_ARTIST_PAGE_RE = re.compile(r'href="[^"]*?/_/([^"?#]+)"')
 
 
 # Last.fm returns this hash for the default "star" placeholder — treat as no image
@@ -556,7 +559,6 @@ def public_library_artist_first_listen(
     username: str,
     artist: str,
     total_artist_scrobbles: int,
-    lookup_id: str | None = None,
 ) -> tuple[str, str, str] | tuple[None, None, None]:
     """Scrape the public artist library page and return (date, timestamp, track) of the oldest scrobble.
 
@@ -641,20 +643,17 @@ def _extract_track_name_near_date(html: str, date_text: str) -> str:
     Returns an empty string when the track cannot be identified.
     """
     from urllib.parse import unquote
-    track_link_re = re.compile(r'href="[^"]+/_/([^"?#]+)"')
     date_pos = html.rfind(date_text)
     if date_pos == -1:
         return ""
     snippet = html[:date_pos]
-    track_matches = track_link_re.findall(snippet)
+    track_matches = TRACK_LINK_IN_ARTIST_PAGE_RE.findall(snippet)
     if not track_matches:
         return ""
     return unquote(track_matches[-1].replace("+", " "))
 
 
-def _find_and_store_artist_first_listen(
-    username: str, artist: str, lookup_id: str | None = None
-) -> dict:
+def _find_and_store_artist_first_listen(username: str, artist: str) -> dict:
     """Look up (and cache) the first time *username* listened to any track by *artist*.
 
     Checks the database first; if not found, queries Last.fm for the artist play
@@ -682,9 +681,9 @@ def _find_and_store_artist_first_listen(
     date, timestamp, track_name = None, None, ""
     try:
         result = public_library_artist_first_listen(
-            username, artist, total_artist_scrobbles, lookup_id
+            username, artist, total_artist_scrobbles
         )
-        if result and len(result) == 3:
+        if result[0] is not None:
             date, timestamp, track_name = result
     except Exception:
         app.logger.exception(
@@ -703,6 +702,9 @@ def _find_and_store_artist_first_listen(
         "first_listen_timestamp": timestamp or "",
         "first_listen_track": track_name or "",
     }
+
+
+@app.route("/")
 def index():
     return send_from_directory("static", "index.html")
 
@@ -1172,7 +1174,7 @@ def _do_first_listen_lookup(
     )
 
     # Look up (and cache) when this artist was first heard by the user
-    artist_first = _find_and_store_artist_first_listen(username, canonical_artist, lookup_id)
+    artist_first = _find_and_store_artist_first_listen(username, canonical_artist)
 
     app.logger.info(
         "lookup finished %s date_found=%s cached=%s elapsed_ms=%s",
