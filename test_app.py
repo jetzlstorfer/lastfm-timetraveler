@@ -627,6 +627,10 @@ class TestDatabaseCaching:
             "01 May 2011, 14:00", "1304258400",
             88, "https://img.example/lazy.jpg",
         )
+        database.save_artist_first_listen(
+            "testuser", "Bruno Mars",
+            "Just The Way You Are", "01 Jan 2011, 10:00", "1293872400",
+        )
 
         resp = client.get("/api/first-listen?track=Lazy+Song&artist=Bruno+Mars&username=testuser")
         data = resp.get_json()
@@ -650,6 +654,10 @@ class TestDatabaseCaching:
             "Greatest Hits",
             "01 Jan 2005, 10:00", "1104573600",
             50, "",
+        )
+        database.save_artist_first_listen(
+            "testuser", "Classic Band",
+            "Old Hit", "01 Jan 2005, 10:00", "1104573600",
         )
         queried_at_before = database.get_cached("testuser", "Old Hit", "Classic Band")["queried_at"]
 
@@ -675,6 +683,10 @@ class TestDatabaseCaching:
             "A Night at the Opera",
             "15 Mar 2005, 20:00", "1110924000",
             1000, "",
+        )
+        database.save_artist_first_listen(
+            "testuser", "Queen",
+            "Bohemian Rhapsody", "15 Mar 2005, 20:00", "1110924000",
         )
 
         resp = client.get("/api/first-listen?track=bohemian+rhapsody&artist=queen&username=testuser")
