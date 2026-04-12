@@ -1005,7 +1005,8 @@ def lookup_progress():
 
 
 def _run_first_listen_lookup(
-    username: str, track: str, artist: str, lookup_id: str, flask_app
+    username: str, track: str, artist: str, lookup_id: str, flask_app,
+    hint_timestamp: str | None = None,
 ) -> None:
     """Background worker for the first-listen lookup.
 
@@ -1019,7 +1020,7 @@ def _run_first_listen_lookup(
 
     with flask_app.app_context():
         try:
-            _do_first_listen_lookup(username, track, artist, lookup_id, elapsed_ms)
+            _do_first_listen_lookup(username, track, artist, lookup_id, elapsed_ms, hint_timestamp=hint_timestamp)
         except Exception:
             flask_app.logger.exception(
                 "background lookup failed %s", lookup_context(username, artist, track)
@@ -1037,7 +1038,8 @@ def _run_first_listen_lookup(
 
 
 def _do_first_listen_lookup(
-    username: str, track: str, artist: str, lookup_id: str, elapsed_ms
+    username: str, track: str, artist: str, lookup_id: str, elapsed_ms,
+    hint_timestamp: str | None = None,
 ) -> None:
     # Step 1: Check total play count via track.getInfo (fast, single call)
     try:
@@ -1134,6 +1136,27 @@ def _do_first_listen_lookup(
     if history_summary:
         canonical_track = history_summary["track"] or canonical_track
         canonical_artist = history_summary["artist"] or canonical_artist
+
+    # Fast path: if the caller provided a trusted timestamp hint (e.g. from
+    # the artist-first-listen section), convert it to a date string and skip
+    # all the expensive page scanning.
+    if not exact_date and hint_timestamp:
+        try:
+            hint_ts_int = int(hint_timestamp)
+            hint_dt = datetime.fromtimestamp(hint_ts_int, tz=timezone.utc)
+            exact_date = hint_dt.strftime("%d %b %Y, %H:%M")
+            exact_ts = str(hint_ts_int)
+            app.logger.info(
+                "using hint_timestamp fast path %s hint_ts=%s",
+                lookup_context(username, canonical_artist, canonical_track),
+                hint_timestamp,
+            )
+        except (ValueError, OSError):
+            app.logger.warning(
+                "ignoring invalid hint_timestamp %s hint=%r",
+                lookup_context(username, canonical_artist, canonical_track),
+                hint_timestamp,
+            )
 
     if not exact_date:
         # Save the confirmed lookup metadata before the slower date-resolution
@@ -1278,6 +1301,7 @@ def first_listen():
     track = request.args.get("track", "").strip()
     artist = request.args.get("artist", "").strip()
     username = request.args.get("username", "").strip()
+    hint_timestamp = request.args.get("hint_timestamp", "").strip() or None
 
     if not track or not artist or not username:
         finish_lookup_progress(
@@ -1384,6 +1408,7 @@ def first_listen():
     thread = Thread(
         target=_run_first_listen_lookup,
         args=(username, track, artist, lookup_id, app),
+        kwargs={"hint_timestamp": hint_timestamp},
         daemon=True,
     )
     thread.start()
@@ -1444,6 +1469,7 @@ def history():
                 "queried_at": r["queried_at"],
             }
             for r in results
+            if r.get("track")
         ]
     )
 

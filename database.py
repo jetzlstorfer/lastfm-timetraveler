@@ -488,6 +488,7 @@ def _cosmos_get_history(username: str) -> list[dict]:
     container = _get_cosmos_container()
     query = (
         "SELECT * FROM c WHERE c.username_normalized = @username "
+        "AND c.type = 'search' "
         "ORDER BY c.queried_at DESC"
     )
     items = container.query_items(
