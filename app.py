@@ -1245,6 +1245,47 @@ def _do_first_listen_lookup(
         image_url,
     )
 
+    # Update artist first listen if this track's first listen is earlier
+    if exact_date and exact_ts:
+        try:
+            artist_cached = db.get_artist_first_listen(username, canonical_artist)
+            should_update = False
+
+            if not artist_cached or not artist_cached.get("first_listen_timestamp"):
+                # No artist first listen cached, so this track is the first we know of
+                should_update = True
+                app.logger.info(
+                    "updating artist first-listen (no cached data) %s track=%s date=%s",
+                    lookup_context(username, canonical_artist, canonical_track),
+                    canonical_track,
+                    exact_date,
+                )
+            elif int(exact_ts) < int(artist_cached["first_listen_timestamp"]):
+                # This track's first listen is earlier than the cached artist first listen
+                should_update = True
+                app.logger.info(
+                    "updating artist first-listen (earlier date found) %s track=%s old_date=%s new_date=%s",
+                    lookup_context(username, canonical_artist, canonical_track),
+                    canonical_track,
+                    artist_cached.get("first_listen_date"),
+                    exact_date,
+                )
+
+            if should_update:
+                db.save_artist_first_listen(
+                    username=username,
+                    artist=canonical_artist,
+                    first_listen_track=canonical_track,
+                    first_listen_date=exact_date,
+                    first_listen_timestamp=exact_ts,
+                )
+        except Exception:
+            # Don't fail the main lookup if artist first listen update fails
+            app.logger.exception(
+                "failed to update artist first-listen %s",
+                lookup_context(username, canonical_artist, canonical_track),
+            )
+
     app.logger.info(
         "lookup finished %s date_found=%s cached=%s elapsed_ms=%s",
         lookup_context(username, canonical_artist, canonical_track),
@@ -1341,6 +1382,47 @@ def first_listen():
             cached["image"] or "",
         )
         cached_artist = cached["artist"]
+
+        # Update artist first listen if this track's first listen is earlier
+        if cached_date and cached_timestamp:
+            try:
+                artist_cached = db.get_artist_first_listen(username, cached_artist)
+                should_update = False
+
+                if not artist_cached or not artist_cached.get("first_listen_timestamp"):
+                    # No artist first listen cached, so this track is the first we know of
+                    should_update = True
+                    app.logger.info(
+                        "updating artist first-listen (no cached data) %s track=%s date=%s",
+                        lookup_context(username, cached_artist, cached["track"]),
+                        cached["track"],
+                        cached_date,
+                    )
+                elif int(cached_timestamp) < int(artist_cached["first_listen_timestamp"]):
+                    # This track's first listen is earlier than the cached artist first listen
+                    should_update = True
+                    app.logger.info(
+                        "updating artist first-listen (earlier date found) %s track=%s old_date=%s new_date=%s",
+                        lookup_context(username, cached_artist, cached["track"]),
+                        cached["track"],
+                        artist_cached.get("first_listen_date"),
+                        cached_date,
+                    )
+
+                if should_update:
+                    db.save_artist_first_listen(
+                        username=username,
+                        artist=cached_artist,
+                        first_listen_track=cached["track"],
+                        first_listen_date=cached_date,
+                        first_listen_timestamp=cached_timestamp,
+                    )
+            except Exception:
+                # Don't fail the main lookup if artist first listen update fails
+                app.logger.exception(
+                    "failed to update artist first-listen %s",
+                    lookup_context(username, cached_artist, cached["track"]),
+                )
 
         finish_lookup_progress(
             lookup_id,
