@@ -31,6 +31,11 @@ TRACK_PAGE_PAGINATION_RE = re.compile(r'href="\?page=(\d+)"')
 # Matches Last.fm library links of the form /music/Artist/_/TrackName.
 # The anchored /music/ prefix and restricted character classes prevent ReDoS.
 TRACK_LINK_IN_ARTIST_PAGE_RE = re.compile(r'href="/music/[^/]+/_/([^"?#/]+)"')
+# Matches yearly scrobble counts in the artist library Date Range chart.
+# Each entry is a <a> tag containing a year and the count is in a sibling element.
+ARTIST_YEAR_CHART_RE = re.compile(
+    r'data-value="(\d+)"[^>]*>(\d{4})<'
+)
 
 
 # Last.fm returns this hash for the default "star" placeholder — treat as no image
@@ -593,6 +598,21 @@ def _oldest_scrobble_on_track_page(
     return oldest_date, oldest_ts
 
 
+def _parse_earliest_scrobble_year(html: str) -> int | None:
+    """Extract the earliest year with scrobbles > 0 from the artist library page."""
+    matches = ARTIST_YEAR_CHART_RE.findall(html)
+    earliest = None
+    for count_str, year_str in matches:
+        if int(count_str) > 0:
+            year = int(year_str)
+            if earliest is None or year < earliest:
+                earliest = year
+    return earliest
+
+
+ARTIST_FIRST_LISTEN_MAX_WORKERS = 5
+
+
 def public_library_artist_first_listen(
     username: str,
     artist: str,
@@ -603,9 +623,8 @@ def public_library_artist_first_listen(
     The artist library page (``/user/{u}/library/music/{a}``) lists the user's
     tracks for an artist ordered by play count but does **not** expose individual
     scrobble timestamps.  Per-track pages (``…/_/{track}``) *do* show timestamps,
-    so this function collects the track list and then checks per-track pages —
-    prioritising the least-played tracks which are more likely to include the
-    very first listen.
+    so this function collects the track list and then checks **all** per-track
+    pages in parallel to find the true earliest listen.
 
     Returns ``(date, timestamp, track_name)`` or ``(None, None, None)``.
     """
@@ -632,6 +651,15 @@ def public_library_artist_first_listen(
             "artist library page redirected to login %s final_url=%s", context, resp.url
         )
         return None, None, None
+
+    # Parse the earliest year with scrobbles from the Date Range chart.
+    earliest_year = _parse_earliest_scrobble_year(resp.text)
+    if earliest_year:
+        app.logger.info(
+            "artist library page shows earliest scrobble year %s year=%s",
+            context,
+            earliest_year,
+        )
 
     # Collect track names from all pages of the artist library (ordered most→least played).
     all_track_names: list[str] = list(
@@ -662,32 +690,35 @@ def public_library_artist_first_listen(
         len(all_track_names),
     )
 
-    # Check per-track scrobble pages.  Prioritise the least-played tracks
-    # (end of the list) because they are more likely to include the oldest listen,
-    # but also include a few of the most-played tracks.  Cap total requests.
-    MAX_TRACK_CHECKS = 10
-    candidates: list[str] = []
-    # Least-played first (reversed tail)
-    candidates.extend(reversed(all_track_names))
-    # Add most-played that aren't already included
-    for t in all_track_names:
-        if t not in candidates:
-            candidates.append(t)
-    candidates = candidates[:MAX_TRACK_CHECKS]
-
     best_date: str | None = None
     best_ts: str | None = None
     best_track: str = ""
 
-    for track_encoded in candidates:
-        date, ts = _oldest_scrobble_on_track_page(
-            username, artist, track_encoded, headers
-        )
-        if date and ts:
-            if best_ts is None or int(ts) < int(best_ts):
-                best_date = date
-                best_ts = ts
-                best_track = unquote(track_encoded.replace("+", " "))
+    # Check ALL per-track scrobble pages in parallel to find the true first listen.
+    with ThreadPoolExecutor(max_workers=ARTIST_FIRST_LISTEN_MAX_WORKERS) as executor:
+        futures = {
+            executor.submit(
+                _oldest_scrobble_on_track_page,
+                username, artist, track_encoded, headers,
+            ): track_encoded
+            for track_encoded in all_track_names
+        }
+        for future in as_completed(futures):
+            track_encoded = futures[future]
+            try:
+                date, ts = future.result()
+            except Exception:
+                app.logger.debug(
+                    "artist first-listen track page failed %s track=%s",
+                    context,
+                    track_encoded,
+                )
+                continue
+            if date and ts:
+                if best_ts is None or int(ts) < int(best_ts):
+                    best_date = date
+                    best_ts = ts
+                    best_track = unquote(track_encoded.replace("+", " "))
 
     if best_date:
         app.logger.info(
@@ -1245,24 +1276,20 @@ def _do_first_listen_lookup(
         image_url,
     )
 
-    # Update artist first listen if this track's first listen is earlier
+    # Only *update* the artist first listen if an entry already exists and
+    # this track's date is earlier.  Never *create* a new entry here — that
+    # would pre-seed the cache with just this track's date and prevent the
+    # dedicated /api/artist-first-listen endpoint from doing a full artist-
+    # wide library scrape.
     if exact_date and exact_ts:
         try:
             artist_cached = db.get_artist_first_listen(username, canonical_artist)
-            should_update = False
 
-            if not artist_cached or not artist_cached.get("first_listen_timestamp"):
-                # No artist first listen cached, so this track is the first we know of
-                should_update = True
-                app.logger.info(
-                    "updating artist first-listen (no cached data) %s track=%s date=%s",
-                    lookup_context(username, canonical_artist, canonical_track),
-                    canonical_track,
-                    exact_date,
-                )
-            elif int(exact_ts) < int(artist_cached["first_listen_timestamp"]):
-                # This track's first listen is earlier than the cached artist first listen
-                should_update = True
+            if (
+                artist_cached
+                and artist_cached.get("first_listen_timestamp")
+                and int(exact_ts) < int(artist_cached["first_listen_timestamp"])
+            ):
                 app.logger.info(
                     "updating artist first-listen (earlier date found) %s track=%s old_date=%s new_date=%s",
                     lookup_context(username, canonical_artist, canonical_track),
@@ -1270,8 +1297,6 @@ def _do_first_listen_lookup(
                     artist_cached.get("first_listen_date"),
                     exact_date,
                 )
-
-            if should_update:
                 db.save_artist_first_listen(
                     username=username,
                     artist=canonical_artist,
@@ -1383,24 +1408,17 @@ def first_listen():
         )
         cached_artist = cached["artist"]
 
-        # Update artist first listen if this track's first listen is earlier
+        # Only *update* the artist first listen if an entry already exists and
+        # this cached track's date is earlier.  Never create a new entry here.
         if cached_date and cached_timestamp:
             try:
                 artist_cached = db.get_artist_first_listen(username, cached_artist)
-                should_update = False
 
-                if not artist_cached or not artist_cached.get("first_listen_timestamp"):
-                    # No artist first listen cached, so this track is the first we know of
-                    should_update = True
-                    app.logger.info(
-                        "updating artist first-listen (no cached data) %s track=%s date=%s",
-                        lookup_context(username, cached_artist, cached["track"]),
-                        cached["track"],
-                        cached_date,
-                    )
-                elif int(cached_timestamp) < int(artist_cached["first_listen_timestamp"]):
-                    # This track's first listen is earlier than the cached artist first listen
-                    should_update = True
+                if (
+                    artist_cached
+                    and artist_cached.get("first_listen_timestamp")
+                    and int(cached_timestamp) < int(artist_cached["first_listen_timestamp"])
+                ):
                     app.logger.info(
                         "updating artist first-listen (earlier date found) %s track=%s old_date=%s new_date=%s",
                         lookup_context(username, cached_artist, cached["track"]),
@@ -1408,8 +1426,6 @@ def first_listen():
                         artist_cached.get("first_listen_date"),
                         cached_date,
                     )
-
-                if should_update:
                     db.save_artist_first_listen(
                         username=username,
                         artist=cached_artist,
