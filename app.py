@@ -666,14 +666,21 @@ def public_library_artist_first_listen(
     # (end of the list) because they are more likely to include the oldest listen,
     # but also include a few of the most-played tracks.  Cap total requests.
     MAX_TRACK_CHECKS = 10
-    candidates: list[str] = []
-    # Least-played first (reversed tail)
-    candidates.extend(reversed(all_track_names))
-    # Add most-played that aren't already included
+    HEAD_TRACKS = 5
+    head_count = min(HEAD_TRACKS, len(all_track_names))
+    tail_count = min(MAX_TRACK_CHECKS - head_count, len(all_track_names) - head_count)
+
+    seeded_candidates = (
+        list(reversed(all_track_names[-tail_count:])) + all_track_names[:head_count]
+    )
+    candidates = list(dict.fromkeys(seeded_candidates))
+
+    # Fill any remaining slots with the middle of the list to avoid missing popular tracks.
     for t in all_track_names:
+        if len(candidates) >= MAX_TRACK_CHECKS:
+            break
         if t not in candidates:
             candidates.append(t)
-    candidates = candidates[:MAX_TRACK_CHECKS]
 
     best_date: str | None = None
     best_ts: str | None = None

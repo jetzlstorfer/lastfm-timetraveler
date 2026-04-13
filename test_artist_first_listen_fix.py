@@ -2,6 +2,7 @@
 
 import time
 from unittest.mock import patch
+from urllib.parse import unquote
 
 import pytest
 
@@ -193,3 +194,50 @@ class TestArtistFirstListenAutoUpdate:
         assert artist_cached is not None
         assert artist_cached["first_listen_date"] == "20 Aug 1997, 16:00"
         assert artist_cached["first_listen_track"] == "No Surprises"
+
+    @patch("app.requests.get")
+    @patch.object(app_module, "_oldest_scrobble_on_track_page")
+    @patch.object(app_module, "lastfm_get")
+    def test_artist_first_listen_checks_popular_tracks_when_many_candidates(
+        self, mock_lastfm_get, mock_oldest, mock_requests_get, isolated_db
+    ):
+        """Ensure the lookup still examines top-played tracks when many exist."""
+        mock_lastfm_get.return_value = {"artist": {"stats": {"userplaycount": "25"}}}
+
+        tracks = [f"Track{i}" for i in range(1, 13)]  # 12 tracks listed by playcount
+        artist_html = "".join(
+            f'<a href="/music/Enno+Bunger/_/{t}">{t}</a>' for t in tracks
+        )
+
+        class FakeResponse:
+            def __init__(self, text):
+                self.status_code = 200
+                self.text = text
+                self.url = "https://last.fm/fake"
+
+            def raise_for_status(self):
+                return None
+
+        mock_requests_get.return_value = FakeResponse(artist_html)
+
+        earliest_date = ("01 Jan 2009, 10:00", "1230794400")
+        later_date = ("01 Jan 2014, 10:00", "1388570400")
+
+        calls: list[str] = []
+
+        def fake_oldest(username, artist, track_name_encoded, headers):
+            calls.append(track_name_encoded)
+            track_name = unquote(track_name_encoded.replace("+", " "))
+            if track_name == "Track1":
+                return earliest_date
+            return later_date
+
+        mock_oldest.side_effect = fake_oldest
+
+        result = app_module._find_and_store_artist_first_listen("jet1985", "Enno Bunger")
+
+        called_tracks = {unquote(c.replace("+", " ")) for c in calls}
+        assert "Track1" in called_tracks
+        assert len(calls) <= 10  # still respects request cap
+        assert result["first_listen_track"] == "Track1"
+        assert result["first_listen_date"] == earliest_date[0]
