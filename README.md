@@ -132,7 +132,7 @@ The emulator exposes the database endpoint on `http://localhost:8081` and the lo
 | `GET /api/ready` | Readiness probe — tests API key and database connectivity |
 | `GET /api/user/validate?username=` | Validates a Last.fm username and returns profile info |
 | `GET /api/user/top-tracks?username=&period=` | Top tracks for a user (`7day`, `1month`, `3month`, `6month`, `12month`, `overall`) |
-| `GET /api/on-this-day?username=` | What the user listened to on this day 1, 2, 3, 5, and 10 years ago |
+| `GET /api/on-this-day?username=` | What the user listened to on this day 1, 2, 5, and 10 years ago |
 | `GET /api/search?q=` | Track autocomplete search (minimum 2 characters) |
 | `GET /api/first-listen?track=&artist=&username=` | Find the first scrobble (returns `202` with a `lookup_id` for async polling) |
 | `GET /api/lookup-progress?lookup_id=` | Poll progress of an async first-listen lookup |

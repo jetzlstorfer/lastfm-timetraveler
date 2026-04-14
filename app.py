@@ -923,14 +923,14 @@ def user_recent_tracks():
 
 @app.route("/api/on-this-day")
 def on_this_day():
-    """Find what the user was listening to on this day 1, 5, and 10 years ago."""
+    """Find what the user was listening to on this day 1, 2, 5, and 10 years ago."""
     username = request.args.get("username", "").strip()
     if not username:
         return jsonify({"error": "username is required"}), 400
 
     now = datetime.now(timezone.utc)
     periods = []
-    for years_ago in [1, 2, 3, 5, 10]:
+    for years_ago in [1, 2, 5, 10]:
         try:
             target = now.replace(year=now.year - years_ago)
         except ValueError:
