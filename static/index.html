@@ -1306,17 +1306,52 @@
       return `lookup-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     }
 
-    // Resolve function for the pending async lookup promise.
-    let _lookupResolve = null;
+    // Pending lookup resolvers keyed by lookup ID to avoid cross-talk between overlapping lookups.
+    const pendingLookupResolvers = new Map();
+
+    function clearPendingLookup(lookupId, error = null) {
+      const entry = pendingLookupResolvers.get(lookupId);
+      if (!entry) return;
+      clearTimeout(entry.timeoutId);
+      pendingLookupResolvers.delete(lookupId);
+      if (error && entry.reject) {
+        entry.reject(error);
+      }
+    }
+
+    function cancelAllPendingLookups() {
+      pendingLookupResolvers.forEach((entry, lookupId) => {
+        clearPendingLookup(lookupId, new Error('Lookup cancelled'));
+      });
+    }
+
+    function awaitLookupResult(lookupId) {
+      return new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => {
+          if (pendingLookupResolvers.has(lookupId)) {
+            pendingLookupResolvers.delete(lookupId);
+            reject(new Error('Lookup timed out'));
+          }
+        }, 10 * 60 * 1000);
+        pendingLookupResolvers.set(lookupId, { resolve, reject, timeoutId });
+      });
+    }
+
+    function resolveLookupResult(lookupId, result) {
+      const entry = pendingLookupResolvers.get(lookupId);
+      if (!entry) return;
+      clearTimeout(entry.timeoutId);
+      pendingLookupResolvers.delete(lookupId);
+      entry.resolve(result);
+    }
 
     function stopLookupProgressPolling() {
       clearInterval(lookupProgressInterval);
       lookupProgressInterval = null;
-      currentLookupId = '';
       latestProgressPercent = null;
     }
 
-    function applyLookupProgress(progress) {
+    function applyLookupProgress(progress, lookupId) {
       if (!progress || !progress.found) return;
       if (progress.status) {
         loadingStatusText.textContent = progress.status;
@@ -1332,9 +1367,10 @@
         stopLookupProgressPolling();
         // If the progress payload contains the final result, resolve the
         // pending lookup promise so selectResult can render it.
-        if (progress.result && _lookupResolve) {
-          _lookupResolve(progress.result);
-          _lookupResolve = null;
+        if (progress.result) {
+          resolveLookupResult(lookupId, progress.result);
+        } else {
+          clearPendingLookup(lookupId, new Error('Lookup halted'));
         }
       }
     }
@@ -1343,7 +1379,7 @@
       try {
         const res = await fetch(`/api/lookup-progress?lookup_id=${encodeURIComponent(lookupId)}`);
         const progress = await res.json();
-        applyLookupProgress(progress);
+        applyLookupProgress(progress, lookupId);
       } catch {
         // Keep the main lookup running even if the progress poll fails.
       }
@@ -1782,11 +1818,14 @@
     }
 
     async function selectResult(track) {
+      stopLoadingAnimation();
+      cancelAllPendingLookups();
       hideAC();
       searchInput.value = `${track.name} — ${track.artist}`;
       searchClearBtn.classList.add('visible');
       resultCard.classList.remove('show');
       const lookupId = createLookupId();
+      currentLookupId = lookupId;
       console.info('[lookup:start]', { username: currentUsername, track: track.name, artist: track.artist });
       startLoadingAnimation();
       loadingScreen.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1805,20 +1844,17 @@
           // Async lookup — wait for result via progress polling.
           // Safety timeout: if the server never delivers a result within 10
           // minutes, give up so the UI doesn't hang forever.
-          data = await new Promise((resolve, reject) => {
-            _lookupResolve = resolve;
-            setTimeout(() => {
-              if (_lookupResolve) {
-                _lookupResolve = null;
-                reject(new Error('Lookup timed out'));
-              }
-            }, 10 * 60 * 1000);
-          });
+          data = await awaitLookupResult(lookupId);
         } else {
           data = body;
         }
 
+        if (lookupId !== currentLookupId) {
+          return;
+        }
+
         stopLoadingAnimation();
+        currentLookupId = '';
         console.info('[lookup:done]', {
           track: data.track || track.name,
           artist: data.artist || track.artist,
@@ -1925,10 +1961,14 @@
         fetchAndRenderArtistFirstListen(data.artist);
         fetchAndRenderListeningHistory(data.track, data.artist);
         loadRecentSearches();
-      } catch {
-        _lookupResolve = null;
+      } catch (err) {
+        clearPendingLookup(lookupId, err);
+        if (lookupId !== currentLookupId) {
+          return;
+        }
         stopLoadingAnimation();
-        console.error('[lookup:error]', { username: currentUsername, track: track.name, artist: track.artist });
+        currentLookupId = '';
+        console.error('[lookup:error]', { username: currentUsername, track: track.name, artist: track.artist, error: err && err.message ? err.message : err });
         showError('Something went wrong. Please try again.');
       }
     }
