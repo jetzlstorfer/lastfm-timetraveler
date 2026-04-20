@@ -20,10 +20,16 @@ app.logger.setLevel(logging.INFO)
 
 LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
 LASTFM_BASE = "https://ws.audioscrobbler.com/2.0/"
+LASTFM_LIBRARY_TIMEZONE = (
+    os.getenv("LASTFM_LIBRARY_TIMEZONE", "Europe/Vienna").strip()
+    or "Europe/Vienna"
+)
 LIBRARY_PAGE_SIZE = 50
 RECENT_TRACKS_PAGE_SIZE = 200
 LOOKUP_PROGRESS_TTL_SECONDS = 15 * 60
 LOOKUP_PROGRESS_DONE_TTL_SECONDS = 5 * 60
+SCRAPE_RETRY_ATTEMPTS = 3
+SCRAPE_TIMEOUT_SECONDS = 20
 TRACK_PAGE_DATE_RE = re.compile(
     r'<span title="(?:[A-Z][a-z]+ )?([0-9]{1,2} [A-Z][a-z]{2} [0-9]{4}, [0-9]{1,2}:[0-9]{2}(?:am|pm))">'
 )
@@ -68,6 +74,30 @@ def lastfm_get(method: str, **params):
                 time.sleep(2 ** attempt)
                 continue
             raise
+    raise last_exc
+
+
+def scrape_get(url: str, *, headers: dict | None = None, timeout: int = SCRAPE_TIMEOUT_SECONDS):
+    """Fetch Last.fm HTML pages with lightweight retry/backoff for transient failures."""
+    last_exc = None
+    response = None
+    for attempt in range(SCRAPE_RETRY_ATTEMPTS):
+        try:
+            response = requests.get(url, headers=headers, timeout=timeout)
+            if response.status_code == 429 or response.status_code >= 500:
+                if attempt < SCRAPE_RETRY_ATTEMPTS - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+            return response
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            last_exc = exc
+            if attempt < SCRAPE_RETRY_ATTEMPTS - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise
+
+    if response is not None:
+        return response
     raise last_exc
 
 
@@ -446,7 +476,7 @@ def public_library_first_listen_date(
         pages_total=None,
     )
 
-    resp = requests.get(base_url, headers=headers, timeout=20)
+    resp = scrape_get(base_url, headers=headers)
     if resp.status_code == 404:
         app.logger.info("public track page returned 404 %s", context)
         update_lookup_progress(
@@ -504,7 +534,7 @@ def public_library_first_listen_date(
             status="Trying the public track page",
             detail=f"Fetching public track page {page_count} to look for the oldest visible scrobble.",
         )
-        last_resp = requests.get(last_page_url, headers=headers, timeout=20)
+        last_resp = scrape_get(last_page_url, headers=headers)
         last_resp.raise_for_status()
         if last_resp.history or "/login" in last_resp.url or last_resp.url != last_page_url:
             app.logger.info(
@@ -548,12 +578,28 @@ def public_library_first_listen_date(
     return matches[-1]
 
 
-def lastfm_library_date_to_timestamp(date_text: str) -> str:
+def _get_library_timezone(timezone_name: str | None = None) -> ZoneInfo:
+    tz_name = (timezone_name or LASTFM_LIBRARY_TIMEZONE or "UTC").strip()
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        app.logger.warning(
+            "invalid LASTFM_LIBRARY_TIMEZONE=%r, falling back to UTC",
+            tz_name,
+        )
+        return ZoneInfo("UTC")
+
+
+def lastfm_library_date_to_timestamp(
+    date_text: str,
+    timezone_name: str | None = None,
+) -> str:
     """Convert a Last.fm library page date to a unix timestamp string."""
+    tz = _get_library_timezone(timezone_name)
     for fmt in ("%d %b %Y, %I:%M%p", "%d %b %Y, %H:%M"):
         try:
             dt = datetime.strptime(date_text, fmt)
-            dt = dt.replace(tzinfo=ZoneInfo("Europe/Vienna"))
+            dt = dt.replace(tzinfo=tz)
             return str(int(dt.timestamp()))
         except ValueError:
             continue
@@ -571,7 +617,7 @@ def _oldest_scrobble_on_track_page(
         f"https://www.last.fm/user/{quote(username, safe='')}/library/music/"
         f"{quote(artist, safe='')}/_/{track_name_encoded}"
     )
-    resp = requests.get(track_url, headers=headers, timeout=20)
+    resp = scrape_get(track_url, headers=headers)
     if resp.status_code != 200 or "/login" in resp.url:
         return None, None
 
@@ -580,9 +626,7 @@ def _oldest_scrobble_on_track_page(
     )
     last_page_html = resp.text
     if track_page_count > 1:
-        last_resp = requests.get(
-            f"{track_url}?page={track_page_count}", headers=headers, timeout=20
-        )
+        last_resp = scrape_get(f"{track_url}?page={track_page_count}", headers=headers)
         if last_resp.status_code == 200 and "/login" not in last_resp.url:
             last_page_html = last_resp.text
 
@@ -641,7 +685,7 @@ def public_library_artist_first_listen(
         total_artist_scrobbles,
     )
 
-    resp = requests.get(base_url, headers=headers, timeout=20)
+    resp = scrape_get(base_url, headers=headers)
     if resp.status_code == 404:
         app.logger.info("artist library page returned 404 %s", context)
         return None, None, None
@@ -671,9 +715,7 @@ def public_library_artist_first_listen(
     )
     # Fetch remaining pages to gather more track names.
     for page_num in range(2, page_count + 1):
-        page_resp = requests.get(
-            f"{base_url}?page={page_num}", headers=headers, timeout=20
-        )
+        page_resp = scrape_get(f"{base_url}?page={page_num}", headers=headers)
         if page_resp.status_code != 200 or "/login" in page_resp.url:
             break
         for t in TRACK_LINK_IN_ARTIST_PAGE_RE.findall(page_resp.text):
@@ -1613,6 +1655,18 @@ def _listening_history_cache_key(username: str, track: str, artist: str, months:
     ])
 
 
+def _expected_month_keys(now: datetime, max_months: int) -> list[str]:
+    """Return contiguous YYYY-MM keys (oldest to newest) for the requested window."""
+    keys_newest_first = []
+    base_month_index = now.year * 12 + (now.month - 1)
+    for months_back in range(max_months):
+        month_index = base_month_index - months_back
+        year = month_index // 12
+        month = month_index % 12 + 1
+        keys_newest_first.append(f"{year:04d}-{month:02d}")
+    return list(reversed(keys_newest_first))
+
+
 def _fetch_week_plays(
     username: str, week: dict, norm_track: str, norm_artist: str
 ) -> int:
@@ -1676,12 +1730,8 @@ def listening_history():
 
     now = datetime.now(timezone.utc)
 
-    # Build the list of expected months: current month + (max_months - 1) prior
-    expected_months: list[str] = []
-    for i in range(max_months):
-        dt = now.replace(day=1) - timedelta(days=i * 28)
-        expected_months.append(dt.strftime("%Y-%m"))
-    expected_months = sorted(set(expected_months))
+    # Build contiguous expected months without day-based approximation.
+    expected_months = _expected_month_keys(now, max_months)
 
     cutoff_dt = datetime.strptime(expected_months[0], "%Y-%m").replace(tzinfo=timezone.utc)
     cutoff_ts = int(cutoff_dt.timestamp())

@@ -779,6 +779,21 @@ class TestHistory:
 class TestListeningHistory:
     """Tests for the listening-history endpoint."""
 
+    def test_expected_month_keys_are_contiguous(self):
+        from datetime import datetime, timezone
+
+        now = datetime(2026, 3, 31, 12, 0, tzinfo=timezone.utc)
+        keys = app_module._expected_month_keys(now, 6)
+
+        assert keys == [
+            "2025-10",
+            "2025-11",
+            "2025-12",
+            "2026-01",
+            "2026-02",
+            "2026-03",
+        ]
+
     def test_missing_params_returns_400(self, client):
         resp = client.get("/api/listening-history?username=u&track=t")
         assert resp.status_code == 400
@@ -884,6 +899,24 @@ class TestListeningHistory:
             assert resp2.status_code == 200
             assert api_calls[0] == calls_after_first, "Second request should not trigger new API calls"
             assert resp1.get_json() == resp2.get_json()
+
+
+class TestLibraryDateTimezoneParsing:
+    def test_timestamp_conversion_respects_explicit_timezone(self):
+        date_text = "02 Jan 2007, 20:30"
+
+        assert app_module.lastfm_library_date_to_timestamp(
+            date_text, timezone_name="Europe/Vienna"
+        ) == "1167766200"
+        assert app_module.lastfm_library_date_to_timestamp(
+            date_text, timezone_name="UTC"
+        ) == "1167769800"
+
+    def test_invalid_configured_timezone_falls_back_to_utc(self):
+        date_text = "02 Jan 2007, 20:30"
+
+        with patch.object(app_module, "LASTFM_LIBRARY_TIMEZONE", "Invalid/Zone"):
+            assert app_module.lastfm_library_date_to_timestamp(date_text) == "1167769800"
 
 
 # ---------------------------------------------------------------------------

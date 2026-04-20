@@ -16,6 +16,9 @@ Type a song title, pick from the autocomplete suggestions, and discover when you
    # Edit .env with your API key and Last.fm username
    ```
 
+   Optional settings:
+   - `LASTFM_LIBRARY_TIMEZONE` — timezone used when converting scraped Last.fm library dates into unix timestamps (default: `Europe/Vienna`).
+
 3. **Install & run**:
    ```bash
    python -m venv .venv
@@ -101,6 +104,7 @@ To set up federated credentials (OIDC) for the service principal, follow the [az
 
 - **Autocomplete** uses Last.fm's `track.search` API
 - **First listen** fetches `track.getInfo` for the play count, then scrapes the user's public library page for the oldest visible scrobble date. If the public page is unavailable (private profile, login wall, etc.) it falls back to scanning `user.getRecentTracks` pages backward from oldest to newest
+- **Scrape resilience** — public Last.fm HTML page fetches use retry/backoff for transient failures (timeouts, connection errors, `429`, and `5xx` responses)
 - **Caching** — confirmed lookups are written to Azure Cosmos DB in Azure, or to a local SQLite file by default during development
 - **History** — the `/api/history` endpoint returns cached lookups for a given user, including partial results whose exact first-listen date could not be resolved yet
 - Built with **Flask** (backend) and vanilla **HTML/CSS/JS** (frontend)
