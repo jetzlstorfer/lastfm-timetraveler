@@ -83,7 +83,7 @@ def _track_info_response(userplaycount, track="Songname", artist="Artistname",
     if userplaycount is not None:
         response["track"]["userplaycount"] = str(userplaycount)
     return response
-    return response
+
 
 
 def _weekly_chart_list(weeks):
@@ -677,7 +677,7 @@ class TestDatabaseCaching:
             "queried_at must be updated on a cache hit so the track moves to the top of history"
         )
 
-
+    def test_case_insensitive_cache_hit(self, mock_get, client):
         """Cache hit should work regardless of the casing used in the query."""
         database.save_result(
             "testuser", "Bohemian Rhapsody", "Queen",
