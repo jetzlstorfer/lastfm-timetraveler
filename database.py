@@ -9,11 +9,13 @@ The public API remains the same so the rest of the Flask app can treat the
 cache as a simple key-value store with history queries by username.
 """
 
+import hashlib
 import os
 import re
 import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 try:
@@ -28,6 +30,9 @@ DEFAULT_SQLITE_DB_PATH = "timetraveler.db"
 DB_PATH = os.getenv("DB_PATH", DEFAULT_SQLITE_DB_PATH)
 DEFAULT_COSMOS_DATABASE_NAME = "lastfm-timetraveler"
 DEFAULT_COSMOS_CONTAINER_NAME = "searches"
+COSMOS_SPOTIFY_PROFILES_CONTAINER = "spotify_profiles"
+COSMOS_SPOTIFY_PLAYS_CONTAINER = "spotify_plays"
+SPOTIFY_BULK_INSERT_WORKERS = int(os.getenv("SPOTIFY_BULK_INSERT_WORKERS", "16"))
 SQLITE_TIMEOUT_SECONDS = 30
 INIT_DB_MAX_ATTEMPTS = 3
 INIT_DB_RETRY_DELAY_SECONDS = 0.25
@@ -38,6 +43,7 @@ _COSMOS_SIGNATURE = None
 _COSMOS_CLIENT = None
 _COSMOS_DATABASE = None
 _COSMOS_CONTAINER = None
+_COSMOS_EXTRA_CONTAINERS: dict[str, object] = {}
 
 
 def _normalize_lookup_value(value: str) -> str:
@@ -146,6 +152,47 @@ def _create_sqlite_schema(conn: sqlite3.Connection) -> None:
         ON artist_first_listens (LOWER(username), LOWER(artist))
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS spotify_profiles (
+            profile_id   TEXT PRIMARY KEY,
+            token_hash   TEXT NOT NULL,
+            created_at   TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS spotify_history (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id      TEXT    NOT NULL,
+            track           TEXT    NOT NULL,
+            artist          TEXT    NOT NULL,
+            album           TEXT,
+            played_at       TEXT    NOT NULL,
+            played_at_unix  INTEGER NOT NULL,
+            ms_played       INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_spotify_history_dedup
+        ON spotify_history (LOWER(profile_id), played_at, LOWER(track), LOWER(artist))
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_spotify_history_track_artist
+        ON spotify_history (LOWER(profile_id), LOWER(track), LOWER(artist))
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_spotify_history_artist
+        ON spotify_history (LOWER(profile_id), LOWER(artist))
+        """
+    )
     conn.commit()
 
 
@@ -188,6 +235,74 @@ def _get_cosmos_container():
         _COSMOS_DATABASE = database
         _COSMOS_CONTAINER = container
         return container
+
+
+def _get_cosmos_named_container(container_name: str, partition_key_path: str):
+    """Return (and lazily create) a Cosmos container alongside the primary one."""
+    # Ensure the primary client/database is initialized first.
+    _get_cosmos_container()
+    with _COSMOS_INIT_LOCK:
+        cached = _COSMOS_EXTRA_CONTAINERS.get(container_name)
+        if cached is not None:
+            return cached
+        if _COSMOS_DATABASE is None:
+            raise RuntimeError("Cosmos database is not initialized")
+        container = _COSMOS_DATABASE.create_container_if_not_exists(
+            id=container_name,
+            partition_key=PartitionKey(path=partition_key_path),
+        )
+        _COSMOS_EXTRA_CONTAINERS[container_name] = container
+        return container
+
+
+def _spotify_profiles_container():
+    return _get_cosmos_named_container(COSMOS_SPOTIFY_PROFILES_CONTAINER, "/profile_id_normalized")
+
+
+def _spotify_plays_container():
+    return _get_cosmos_named_container(COSMOS_SPOTIFY_PLAYS_CONTAINER, "/profile_id_normalized")
+
+
+def _spotify_play_doc_id(profile_id: str, played_at: str, track: str, artist: str) -> str:
+    """Deterministic doc id matches the SQLite dedup index semantics."""
+    raw = "|".join([
+        _normalize_lookup_value(profile_id),
+        played_at or "",
+        _normalize_lookup_value(track),
+        _normalize_lookup_value(artist),
+    ])
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _spotify_profile_doc(profile_id: str, token_hash: str) -> dict:
+    return {
+        "id": _normalize_lookup_value(profile_id),
+        "type": "spotify_profile",
+        "profile_id": profile_id,
+        "profile_id_normalized": _normalize_lookup_value(profile_id),
+        "token_hash": token_hash,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _spotify_play_doc(profile_id: str, play: dict) -> dict:
+    track = play["track"]
+    artist = play["artist"]
+    played_at = play["played_at"]
+    return {
+        "id": _spotify_play_doc_id(profile_id, played_at, track, artist),
+        "type": "spotify_play",
+        "profile_id": profile_id,
+        "profile_id_normalized": _normalize_lookup_value(profile_id),
+        "track": track,
+        "track_normalized": _normalize_lookup_value(track),
+        "artist": artist,
+        "artist_normalized": _normalize_lookup_value(artist),
+        "album": play.get("album", "") or "",
+        "played_at": played_at,
+        "played_at_unix": int(play["played_at_unix"]),
+        "ms_played": int(play.get("ms_played", 0) or 0),
+    }
 
 
 def _cosmos_item(
@@ -617,3 +732,462 @@ def save_artist_first_listen(
         first_listen_date=first_listen_date,
         first_listen_timestamp=first_listen_timestamp,
     )
+
+
+# ---------------------------------------------------------------------------
+# Spotify Extended Streaming History
+#
+# Storage: SQLite by default; Azure Cosmos DB when configured (see
+# `_use_cosmos_backend`). Cosmos uses two containers:
+#   - `spotify_profiles`  (partition key: /profile_id_normalized)
+#   - `spotify_plays`     (partition key: /profile_id_normalized)
+# Play documents have a deterministic SHA-1 `id` (see `_spotify_play_doc_id`)
+# so re-uploads are naturally deduplicated via 409 Conflict.
+# ---------------------------------------------------------------------------
+
+
+def create_spotify_profile(profile_id: str, token_hash: str) -> None:
+    """Create a new Spotify profile. Raises if it already exists."""
+    if _use_cosmos_backend():
+        container = _spotify_profiles_container()
+        try:
+            container.create_item(body=_spotify_profile_doc(profile_id, token_hash))
+        except cosmos_exceptions.CosmosResourceExistsError as exc:
+            raise ValueError(f"Spotify profile already exists: {profile_id}") from exc
+        return
+
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        conn.execute(
+            "INSERT INTO spotify_profiles (profile_id, token_hash, created_at) VALUES (?, ?, ?)",
+            (profile_id, token_hash, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+
+
+def spotify_profile_exists(profile_id: str) -> bool:
+    if _use_cosmos_backend():
+        container = _spotify_profiles_container()
+        normalized = _normalize_lookup_value(profile_id)
+        try:
+            container.read_item(item=normalized, partition_key=normalized)
+            return True
+        except cosmos_exceptions.CosmosResourceNotFoundError:
+            return False
+
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM spotify_profiles WHERE LOWER(profile_id) = LOWER(?)",
+            (profile_id,),
+        ).fetchone()
+    return row is not None
+
+
+def verify_spotify_token(profile_id: str, token_hash: str) -> bool:
+    """Return True iff *(profile_id, token_hash)* matches a stored profile."""
+    if not profile_id or not token_hash:
+        return False
+    if _use_cosmos_backend():
+        container = _spotify_profiles_container()
+        normalized = _normalize_lookup_value(profile_id)
+        try:
+            item = container.read_item(item=normalized, partition_key=normalized)
+        except cosmos_exceptions.CosmosResourceNotFoundError:
+            return False
+        return (item.get("token_hash") or "") == token_hash
+
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        row = conn.execute(
+            "SELECT token_hash FROM spotify_profiles WHERE LOWER(profile_id) = LOWER(?)",
+            (profile_id,),
+        ).fetchone()
+    if not row:
+        return False
+    return (row["token_hash"] or "") == token_hash
+
+
+def save_spotify_plays(profile_id: str, plays: list[dict]) -> int:
+    """Bulk-insert Spotify plays. Returns the number of newly-inserted rows.
+
+    Each *play* dict must have keys: track, artist, album, played_at,
+    played_at_unix, ms_played. Existing rows are ignored (deterministic id).
+    """
+    if not plays:
+        return 0
+
+    if _use_cosmos_backend():
+        container = _spotify_plays_container()
+        docs = [_spotify_play_doc(profile_id, p) for p in plays]
+        inserted = 0
+
+        def _insert_one(doc):
+            try:
+                container.create_item(body=doc)
+                return True
+            except cosmos_exceptions.CosmosResourceExistsError:
+                return False
+            except cosmos_exceptions.CosmosHttpResponseError:
+                # SDK already retries 429s; surface other errors as a skip.
+                return False
+
+        with ThreadPoolExecutor(max_workers=max(1, SPOTIFY_BULK_INSERT_WORKERS)) as ex:
+            futures = [ex.submit(_insert_one, d) for d in docs]
+            for fut in as_completed(futures):
+                if fut.result():
+                    inserted += 1
+        return inserted
+
+    _sqlite_init_db()
+    rows = [
+        (
+            profile_id,
+            p["track"],
+            p["artist"],
+            p.get("album", "") or "",
+            p["played_at"],
+            int(p["played_at_unix"]),
+            int(p.get("ms_played", 0) or 0),
+        )
+        for p in plays
+    ]
+    with _sqlite_connect() as conn:
+        before = conn.execute(
+            "SELECT COUNT(*) AS c FROM spotify_history WHERE LOWER(profile_id) = LOWER(?)",
+            (profile_id,),
+        ).fetchone()["c"]
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO spotify_history
+                (profile_id, track, artist, album, played_at, played_at_unix, ms_played)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        conn.commit()
+        after = conn.execute(
+            "SELECT COUNT(*) AS c FROM spotify_history WHERE LOWER(profile_id) = LOWER(?)",
+            (profile_id,),
+        ).fetchone()["c"]
+    return int(after) - int(before)
+
+
+def has_spotify_data(profile_id: str) -> bool:
+    if _use_cosmos_backend():
+        container = _spotify_plays_container()
+        normalized = _normalize_lookup_value(profile_id)
+        items = list(container.query_items(
+            query="SELECT TOP 1 c.id FROM c WHERE c.profile_id_normalized = @p",
+            parameters=[{"name": "@p", "value": normalized}],
+            partition_key=normalized,
+        ))
+        return bool(items)
+
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM spotify_history WHERE LOWER(profile_id) = LOWER(?) LIMIT 1",
+            (profile_id,),
+        ).fetchone()
+    return row is not None
+
+
+def get_spotify_first_listen(profile_id: str, track: str, artist: str) -> dict | None:
+    """Return the earliest play of *(track, artist)* for the profile, or None."""
+    if _use_cosmos_backend():
+        container = _spotify_plays_container()
+        normalized = _normalize_lookup_value(profile_id)
+        items = list(container.query_items(
+            query=(
+                "SELECT TOP 1 c.track, c.artist, c.album, c.played_at, c.played_at_unix "
+                "FROM c WHERE c.profile_id_normalized = @p "
+                "AND c.track_normalized = @t AND c.artist_normalized = @a "
+                "ORDER BY c.played_at_unix ASC"
+            ),
+            parameters=[
+                {"name": "@p", "value": normalized},
+                {"name": "@t", "value": _normalize_lookup_value(track)},
+                {"name": "@a", "value": _normalize_lookup_value(artist)},
+            ],
+            partition_key=normalized,
+        ))
+        return items[0] if items else None
+
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        row = conn.execute(
+            """
+            SELECT track, artist, album, played_at, played_at_unix
+            FROM spotify_history
+            WHERE LOWER(profile_id) = LOWER(?)
+              AND LOWER(track)      = LOWER(?)
+              AND LOWER(artist)     = LOWER(?)
+            ORDER BY played_at_unix ASC
+            LIMIT 1
+            """,
+            (profile_id, track, artist),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_spotify_artist_first_listen(profile_id: str, artist: str) -> dict | None:
+    """Return the earliest play of any track by *artist* for the profile."""
+    if _use_cosmos_backend():
+        container = _spotify_plays_container()
+        normalized = _normalize_lookup_value(profile_id)
+        items = list(container.query_items(
+            query=(
+                "SELECT TOP 1 c.track, c.artist, c.album, c.played_at, c.played_at_unix "
+                "FROM c WHERE c.profile_id_normalized = @p AND c.artist_normalized = @a "
+                "ORDER BY c.played_at_unix ASC"
+            ),
+            parameters=[
+                {"name": "@p", "value": normalized},
+                {"name": "@a", "value": _normalize_lookup_value(artist)},
+            ],
+            partition_key=normalized,
+        ))
+        return items[0] if items else None
+
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        row = conn.execute(
+            """
+            SELECT track, artist, album, played_at, played_at_unix
+            FROM spotify_history
+            WHERE LOWER(profile_id) = LOWER(?)
+              AND LOWER(artist)     = LOWER(?)
+            ORDER BY played_at_unix ASC
+            LIMIT 1
+            """,
+            (profile_id, artist),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_spotify_play_count(profile_id: str, track: str, artist: str) -> int:
+    if _use_cosmos_backend():
+        container = _spotify_plays_container()
+        normalized = _normalize_lookup_value(profile_id)
+        items = list(container.query_items(
+            query=(
+                "SELECT VALUE COUNT(1) FROM c WHERE c.profile_id_normalized = @p "
+                "AND c.track_normalized = @t AND c.artist_normalized = @a"
+            ),
+            parameters=[
+                {"name": "@p", "value": normalized},
+                {"name": "@t", "value": _normalize_lookup_value(track)},
+                {"name": "@a", "value": _normalize_lookup_value(artist)},
+            ],
+            partition_key=normalized,
+        ))
+        return int(items[0]) if items else 0
+
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM spotify_history
+            WHERE LOWER(profile_id) = LOWER(?)
+              AND LOWER(track)      = LOWER(?)
+              AND LOWER(artist)     = LOWER(?)
+            """,
+            (profile_id, track, artist),
+        ).fetchone()
+    return int(row["c"] or 0)
+
+
+def clear_spotify_data(profile_id: str) -> int:
+    """Delete all imported plays for *profile_id*. Returns rows deleted."""
+    if _use_cosmos_backend():
+        container = _spotify_plays_container()
+        normalized = _normalize_lookup_value(profile_id)
+        # Count first; the partition-key delete returns no count.
+        count_items = list(container.query_items(
+            query="SELECT VALUE COUNT(1) FROM c WHERE c.profile_id_normalized = @p",
+            parameters=[{"name": "@p", "value": normalized}],
+            partition_key=normalized,
+        ))
+        count = int(count_items[0]) if count_items else 0
+        if count == 0:
+            return 0
+        try:
+            container.delete_all_items_by_partition_key(normalized)
+        except AttributeError:
+            # Older SDKs: fall back to per-item delete.
+            ids = list(container.query_items(
+                query="SELECT c.id FROM c WHERE c.profile_id_normalized = @p",
+                parameters=[{"name": "@p", "value": normalized}],
+                partition_key=normalized,
+            ))
+            for item in ids:
+                try:
+                    container.delete_item(item=item["id"], partition_key=normalized)
+                except cosmos_exceptions.CosmosResourceNotFoundError:
+                    pass
+        return count
+
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM spotify_history WHERE LOWER(profile_id) = LOWER(?)",
+            (profile_id,),
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def delete_spotify_profile(profile_id: str) -> None:
+    if _use_cosmos_backend():
+        clear_spotify_data(profile_id)
+        profiles = _spotify_profiles_container()
+        normalized = _normalize_lookup_value(profile_id)
+        try:
+            profiles.delete_item(item=normalized, partition_key=normalized)
+        except cosmos_exceptions.CosmosResourceNotFoundError:
+            pass
+        return
+
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        conn.execute(
+            "DELETE FROM spotify_history WHERE LOWER(profile_id) = LOWER(?)",
+            (profile_id,),
+        )
+        conn.execute(
+            "DELETE FROM spotify_profiles WHERE LOWER(profile_id) = LOWER(?)",
+            (profile_id,),
+        )
+        conn.commit()
+
+
+def search_spotify_tracks(profile_id: str, query: str, limit: int = 20) -> list[dict]:
+    """LIKE-based autocomplete search over imported Spotify tracks."""
+    if not query or not query.strip():
+        return []
+    if _use_cosmos_backend():
+        container = _spotify_plays_container()
+        normalized = _normalize_lookup_value(profile_id)
+        needle = _normalize_lookup_value(query)
+        # GROUP BY in Cosmos doesn't support ORDER BY on aggregates without
+        # composite indexes; do the ranking client-side over a bounded result set.
+        items = list(container.query_items(
+            query=(
+                "SELECT c.track, c.artist, c.album, c.track_normalized, "
+                "c.artist_normalized, c.played_at_unix "
+                "FROM c WHERE c.profile_id_normalized = @p "
+                "AND (CONTAINS(c.track_normalized, @q) OR CONTAINS(c.artist_normalized, @q)) "
+                "ORDER BY c.played_at_unix DESC OFFSET 0 LIMIT 5000"
+            ),
+            parameters=[
+                {"name": "@p", "value": normalized},
+                {"name": "@q", "value": needle},
+            ],
+            partition_key=normalized,
+        ))
+        agg: dict[tuple[str, str], dict] = {}
+        for it in items:
+            key = (it.get("track_normalized", ""), it.get("artist_normalized", ""))
+            existing = agg.get(key)
+            played = int(it.get("played_at_unix") or 0)
+            if existing is None:
+                agg[key] = {
+                    "track": it.get("track", ""),
+                    "artist": it.get("artist", ""),
+                    "album": it.get("album", ""),
+                    "first_played": played,
+                    "_count": 1,
+                }
+            else:
+                existing["_count"] += 1
+                if played < existing["first_played"]:
+                    existing["first_played"] = played
+        ranked = sorted(agg.values(), key=lambda d: d["_count"], reverse=True)[: int(limit)]
+        for r in ranked:
+            r.pop("_count", None)
+        return ranked
+
+    _sqlite_init_db()
+    pattern = f"%{_normalize_lookup_value(query)}%"
+    with _sqlite_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT track, artist, album, MIN(played_at_unix) AS first_played
+            FROM spotify_history
+            WHERE LOWER(profile_id) = LOWER(?)
+              AND (LOWER(track) LIKE ? OR LOWER(artist) LIKE ?)
+            GROUP BY LOWER(track), LOWER(artist)
+            ORDER BY COUNT(*) DESC
+            LIMIT ?
+            """,
+            (profile_id, pattern, pattern, int(limit)),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_spotify_stats(profile_id: str) -> dict:
+    if _use_cosmos_backend():
+        container = _spotify_plays_container()
+        normalized = _normalize_lookup_value(profile_id)
+        agg = list(container.query_items(
+            query=(
+                "SELECT VALUE { total: COUNT(1), earliest: MIN(c.played_at), "
+                "latest: MAX(c.played_at) } FROM c WHERE c.profile_id_normalized = @p"
+            ),
+            parameters=[{"name": "@p", "value": normalized}],
+            partition_key=normalized,
+        ))
+        totals = agg[0] if agg else {}
+        # Distinct counts via GROUP BY (one row per distinct value).
+        track_groups = list(container.query_items(
+            query=(
+                "SELECT c.track_normalized, c.artist_normalized FROM c "
+                "WHERE c.profile_id_normalized = @p "
+                "GROUP BY c.track_normalized, c.artist_normalized"
+            ),
+            parameters=[{"name": "@p", "value": normalized}],
+            partition_key=normalized,
+        ))
+        artist_groups = list(container.query_items(
+            query=(
+                "SELECT c.artist_normalized FROM c "
+                "WHERE c.profile_id_normalized = @p "
+                "GROUP BY c.artist_normalized"
+            ),
+            parameters=[{"name": "@p", "value": normalized}],
+            partition_key=normalized,
+        ))
+        return {
+            "total_plays": int(totals.get("total") or 0),
+            "unique_tracks": len(track_groups),
+            "unique_artists": len(artist_groups),
+            "earliest": totals.get("earliest") or "",
+            "latest": totals.get("latest") or "",
+        }
+
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*)                                           AS total_plays,
+                COUNT(DISTINCT LOWER(track) || '|' || LOWER(artist)) AS unique_tracks,
+                COUNT(DISTINCT LOWER(artist))                      AS unique_artists,
+                MIN(played_at)                                     AS earliest,
+                MAX(played_at)                                     AS latest
+            FROM spotify_history
+            WHERE LOWER(profile_id) = LOWER(?)
+            """,
+            (profile_id,),
+        ).fetchone()
+    return {
+        "total_plays": int(row["total_plays"] or 0),
+        "unique_tracks": int(row["unique_tracks"] or 0),
+        "unique_artists": int(row["unique_artists"] or 0),
+        "earliest": row["earliest"] or "",
+        "latest": row["latest"] or "",
+    }
+
+

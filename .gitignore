@@ -5,3 +5,4 @@ venv/
 .venv/
 .azure/
 *.db
+my_spotify_data/

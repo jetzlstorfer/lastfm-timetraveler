@@ -946,6 +946,42 @@
       }
     }
 
+    @keyframes barStripes {
+      from { background-position: 0 0; }
+      to   { background-position: 1.5rem 0; }
+    }
+    .bar-processing {
+      width: 100% !important;
+      background-image: linear-gradient(
+        45deg,
+        rgba(255,255,255,0.25) 25%,
+        transparent 25%,
+        transparent 50%,
+        rgba(255,255,255,0.25) 50%,
+        rgba(255,255,255,0.25) 75%,
+        transparent 75%,
+        transparent
+      );
+      background-size: 1.5rem 1.5rem;
+      animation: barStripes 0.8s linear infinite;
+    }
+    .info-tip {
+      display: inline-block;
+      width: 1rem;
+      height: 1rem;
+      line-height: 1rem;
+      text-align: center;
+      border-radius: 9999px;
+      background: rgba(255,255,255,0.12);
+      color: #d6d3d1;
+      font-size: 0.65rem;
+      font-weight: 700;
+      cursor: help;
+      vertical-align: middle;
+      margin-left: 0.25rem;
+    }
+    .info-tip:hover { background: rgba(255,255,255,0.22); color: #fff; }
+
     .placeholder-state {
       border-radius: 1rem;
       border: 1px dashed rgba(255, 255, 255, 0.08);
@@ -1037,6 +1073,33 @@
               <div class="user-stats" id="user-stats"></div>
             </div>
             <button class="ghost-button px-4 py-2 text-sm font-medium" id="change-user-btn">Change</button>
+          </div>
+
+          <!-- Spotify import: shown alongside the Last.fm input. -->
+          <div class="mt-4 rounded-2xl border border-white/10 bg-white/5 p-4" id="spotify-card">
+            <div class="flex items-center justify-between gap-3 flex-wrap">
+              <div>
+                <div class="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-300">Spotify import (optional)</div>
+                <div class="mt-1 text-sm text-stone-300">
+                  Upload your <em>Spotify Extended Streaming History</em> to use it as the primary source.
+                  <a class="text-emerald-300 hover:text-emerald-200 underline" href="https://www.spotify.com/account/privacy/" target="_blank" rel="noreferrer">Request your data &rarr;</a>
+                </div>
+              </div>
+              <div id="spotify-status" class="text-xs text-stone-400">Not connected</div>
+            </div>
+            <div id="spotify-form" class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+              <input id="spotify-profile-input" class="field-input flex-1 px-3 py-2 text-sm" type="text" placeholder="Display name (e.g. your Spotify username)" autocomplete="off" />
+              <input id="spotify-files-input" class="text-xs text-stone-300 file:mr-3 file:rounded-md file:border-0 file:bg-emerald-600/80 file:px-3 file:py-2 file:text-xs file:text-white hover:file:bg-emerald-500" type="file" accept=".json,.zip" multiple />
+              <button id="spotify-upload-btn" class="primary-button px-4 py-2 text-sm" type="button">Upload</button>
+            </div>
+            <div id="spotify-upload-status" class="mt-2 text-xs text-stone-400" aria-live="polite"></div>
+            <div id="spotify-upload-progress" class="mt-1 hidden">
+              <div class="h-1.5 w-full overflow-hidden rounded-full bg-white/10"><div id="spotify-upload-bar" class="h-full w-0 bg-emerald-500 transition-all"></div></div>
+            </div>
+            <div id="spotify-connected" class="mt-3 hidden flex items-center justify-between gap-3 flex-wrap">
+              <div class="text-sm text-stone-200" id="spotify-connected-text"></div>
+              <button id="spotify-disconnect-btn" class="ghost-button px-3 py-1.5 text-xs" type="button">Clear &amp; disconnect</button>
+            </div>
           </div>
         </div>
 
@@ -1173,6 +1236,25 @@
     let currentResults = [];
     let configOk = false;
     let currentUsername = '';
+
+    // Spotify connection state
+    let spotifyProfileId = '';
+    let spotifyToken = '';
+    let spotifyHasData = false;
+    let spotifyStats = null;
+
+    const spotifyCard = document.getElementById('spotify-card');
+    const spotifyForm = document.getElementById('spotify-form');
+    const spotifyProfileInput = document.getElementById('spotify-profile-input');
+    const spotifyFilesInput = document.getElementById('spotify-files-input');
+    const spotifyUploadBtn = document.getElementById('spotify-upload-btn');
+    const spotifyUploadStatus = document.getElementById('spotify-upload-status');
+    const spotifyUploadProgress = document.getElementById('spotify-upload-progress');
+    const spotifyUploadBar = document.getElementById('spotify-upload-bar');
+    const spotifyStatusEl = document.getElementById('spotify-status');
+    const spotifyConnected = document.getElementById('spotify-connected');
+    const spotifyConnectedText = document.getElementById('spotify-connected-text');
+    const spotifyDisconnectBtn = document.getElementById('spotify-disconnect-btn');
 
     const loadingScreen = document.getElementById('loading-screen');
     const yearCounter = document.getElementById('year-counter');
@@ -1479,10 +1561,15 @@
           connectBtn.disabled = true;
         } else {
           configOk = true;
+          // Auto-reconnect Spotify if cookies are present.
+          await tryAutoReconnectSpotify();
           const saved = getCookie('lastfm_username');
           if (saved) {
             usernameInput.value = saved;
             connectUser(saved);
+          } else if (spotifyHasData) {
+            // Spotify-only flow: reveal the search section without a Last.fm username.
+            enterSearchMode();
           }
         }
       } catch {
@@ -1490,6 +1577,162 @@
         configBanner.classList.add('show');
       }
     })();
+
+    async function tryAutoReconnectSpotify() {
+      const profileId = getCookie('spotify_profile_id');
+      const token = getCookie('spotify_token');
+      if (!profileId || !token) return;
+      try {
+        const res = await fetch(`/api/spotify/status?profile_id=${encodeURIComponent(profileId)}`, {
+          headers: { 'X-Spotify-Token': token },
+        });
+        if (!res.ok) {
+          // Stale cookie — clear it.
+          setCookie('spotify_profile_id', '', -1);
+          setCookie('spotify_token', '', -1);
+          return;
+        }
+        const body = await res.json();
+        if (body.ok) {
+          spotifyProfileId = profileId;
+          spotifyToken = token;
+          spotifyHasData = !!body.has_data;
+          spotifyStats = body.stats || null;
+          renderSpotifyConnected();
+        }
+      } catch {
+        // network error; ignore and let the user re-upload if needed.
+      }
+    }
+
+    function renderSpotifyConnected() {
+      if (!spotifyProfileId || !spotifyToken) {
+        spotifyForm.classList.remove('hidden');
+        spotifyConnected.classList.add('hidden');
+        spotifyStatusEl.textContent = 'Not connected';
+        return;
+      }
+      spotifyForm.classList.add('hidden');
+      spotifyConnected.classList.remove('hidden');
+      spotifyConnected.classList.add('flex');
+      const totals = spotifyStats
+        ? `${spotifyStats.total_plays.toLocaleString()} plays · ${spotifyStats.unique_tracks.toLocaleString()} tracks · ${spotifyStats.unique_artists.toLocaleString()} artists`
+        : '';
+      spotifyConnectedText.textContent = `Spotify: ${spotifyProfileId}${totals ? ' — ' + totals : ''}`;
+      spotifyStatusEl.textContent = '✓ Connected';
+      spotifyStatusEl.classList.add('text-emerald-300');
+    }
+
+    function enterSearchMode() {
+      searchSection.classList.add('show');
+      howItWorks.style.display = 'none';
+    }
+
+    spotifyUploadBtn.addEventListener('click', () => uploadSpotifyFiles());
+
+    spotifyDisconnectBtn.addEventListener('click', async () => {
+      if (!spotifyProfileId || !spotifyToken) return;
+      if (!confirm('Clear all imported Spotify data and disconnect?')) return;
+      try {
+        await fetch(`/api/spotify/data?profile_id=${encodeURIComponent(spotifyProfileId)}&delete_profile=true`, {
+          method: 'DELETE',
+          headers: { 'X-Spotify-Token': spotifyToken },
+        });
+      } catch {}
+      setCookie('spotify_profile_id', '', -1);
+      setCookie('spotify_token', '', -1);
+      spotifyProfileId = '';
+      spotifyToken = '';
+      spotifyHasData = false;
+      spotifyStats = null;
+      renderSpotifyConnected();
+    });
+
+    async function uploadSpotifyFiles() {
+      const profileId = (spotifyProfileInput.value || spotifyProfileId || '').trim();
+      const files = Array.from(spotifyFilesInput.files || []);
+      if (!profileId) {
+        spotifyUploadStatus.textContent = 'Enter a display name first.';
+        return;
+      }
+      if (!files.length) {
+        spotifyUploadStatus.textContent = 'Select at least one .json or .zip file.';
+        return;
+      }
+      const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+      if (totalSize > 500 * 1024 * 1024) {
+        spotifyUploadStatus.textContent = 'Selected files exceed the 500 MB upload limit.';
+        return;
+      }
+
+      const fd = new FormData();
+      fd.append('profile_id', profileId);
+      files.forEach((f) => fd.append('files', f));
+
+      spotifyUploadBtn.disabled = true;
+      spotifyUploadStatus.textContent = 'Uploading…';
+      spotifyUploadProgress.classList.remove('hidden');
+      spotifyUploadBar.style.width = '0%';
+
+      const xhr = new XMLHttpRequest();
+      const url = '/api/spotify/upload';
+      xhr.open('POST', url);
+      if (spotifyToken && spotifyProfileId === profileId) {
+        xhr.setRequestHeader('X-Spotify-Token', spotifyToken);
+      }
+      const switchToProcessing = () => {
+        spotifyUploadBar.style.width = '100%';
+        spotifyUploadBar.classList.add('bar-processing');
+        spotifyUploadStatus.textContent =
+          'Upload complete. Processing on server… parsing JSON, filtering podcasts/short plays, and saving to the database. This can take a moment for large libraries.';
+      };
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const pct = Math.round((event.loaded / event.total) * 100);
+          if (pct < 100) {
+            spotifyUploadBar.style.width = pct + '%';
+            spotifyUploadStatus.textContent = `Uploading… ${pct}%`;
+          }
+        }
+      };
+      xhr.upload.onload = () => {
+        // All bytes sent; the server is now parsing & importing.
+        switchToProcessing();
+      };
+      xhr.onload = () => {
+        spotifyUploadBtn.disabled = false;
+        spotifyUploadBar.classList.remove('bar-processing');
+        let body;
+        try { body = JSON.parse(xhr.responseText); } catch { body = null; }
+        if (xhr.status >= 200 && xhr.status < 300 && body && body.ok) {
+          if (body.token) {
+            spotifyToken = body.token;
+            setCookie('spotify_token', spotifyToken);
+          }
+          spotifyProfileId = profileId;
+          setCookie('spotify_profile_id', spotifyProfileId);
+          spotifyHasData = true;
+          spotifyStats = body.stats || null;
+          const fileWord = body.files_processed === 1 ? 'file' : 'files';
+          const filteredTip = `<span class="info-tip" title="Plays excluded from import: podcasts/audiobooks (no track metadata) and very short plays (under 30 seconds). This matches Spotify's own counting threshold." aria-label="What does filtered mean?">?</span>`;
+          spotifyUploadStatus.innerHTML =
+            `Imported <strong>${body.imported.toLocaleString()}</strong> plays from ${body.files_processed} ${fileWord} ` +
+            `(<strong>${body.filtered.toLocaleString()}</strong> filtered${filteredTip}).`;
+          spotifyUploadBar.style.width = '100%';
+          renderSpotifyConnected();
+          enterSearchMode();
+        } else {
+          const msg = (body && body.error) || `Upload failed (HTTP ${xhr.status}).`;
+          spotifyUploadStatus.textContent = msg;
+        }
+      };
+      xhr.onerror = () => {
+        spotifyUploadBtn.disabled = false;
+        spotifyUploadBar.classList.remove('bar-processing');
+        spotifyUploadStatus.textContent = 'Upload failed (network error).';
+      };
+      xhr.send(fd);
+    }
 
     connectBtn.addEventListener('click', () => {
       const username = usernameInput.value.trim();
@@ -1772,8 +2015,45 @@
 
     async function fetchAutocomplete(query) {
       try {
-        const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
-        currentResults = await res.json();
+        const tasks = [];
+        if (currentUsername) {
+          tasks.push(fetch(`/api/search?q=${encodeURIComponent(query)}`).then(r => r.json()).catch(() => []));
+        }
+        if (spotifyProfileId && spotifyToken) {
+          tasks.push(fetch(`/api/spotify/search?profile_id=${encodeURIComponent(spotifyProfileId)}&q=${encodeURIComponent(query)}`, {
+            headers: { 'X-Spotify-Token': spotifyToken },
+          }).then(r => r.ok ? r.json() : []).catch(() => []));
+        }
+        if (!tasks.length) {
+          hideAC();
+          return;
+        }
+        const results = await Promise.all(tasks);
+        // results[0] = lastfm (if username), results[1] = spotify (if connected)
+        // But order depends on which were added. Recompute:
+        let lastfmResults = [];
+        let spotifyResults = [];
+        let i = 0;
+        if (currentUsername) { lastfmResults = results[i++] || []; }
+        if (spotifyProfileId && spotifyToken) { spotifyResults = results[i++] || []; }
+
+        // Tag sources, dedupe by normalized track+artist (Spotify wins if connected)
+        const seen = new Set();
+        const merged = [];
+        const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        spotifyResults.forEach((t) => {
+          const key = norm(t.name) + '|' + norm(t.artist);
+          if (seen.has(key)) return;
+          seen.add(key);
+          merged.push({ ...t, source: 'spotify' });
+        });
+        lastfmResults.forEach((t) => {
+          const key = norm(t.name) + '|' + norm(t.artist);
+          if (seen.has(key)) return;
+          seen.add(key);
+          merged.push({ ...t, source: 'lastfm' });
+        });
+        currentResults = merged;
         renderAC(currentResults);
       } catch {
         hideAC();
@@ -1791,7 +2071,7 @@
         <div class="ac-item" data-idx="${index}">
           <img src="${track.image || defaultThumb()}" alt="" />
           <div class="ac-text">
-            <span class="ac-track">${escHtml(track.name)}</span>
+            <span class="ac-track">${escHtml(track.name)}${track.source === 'spotify' ? ' <span style="font-size:10px;color:#34d399;font-weight:600">SPOTIFY</span>' : ''}</span>
             <span class="ac-artist">${escHtml(track.artist)}</span>
           </div>
         </div>
@@ -1832,11 +2112,19 @@
       startLookupProgressPolling(lookupId);
 
       try {
-        let firstListenUrl = `/api/first-listen?track=${encodeURIComponent(track.name)}&artist=${encodeURIComponent(track.artist)}&username=${encodeURIComponent(currentUsername)}&lookup_id=${encodeURIComponent(lookupId)}`;
+        let firstListenUrl = `/api/first-listen?track=${encodeURIComponent(track.name)}&artist=${encodeURIComponent(track.artist)}&lookup_id=${encodeURIComponent(lookupId)}`;
+        if (currentUsername) {
+          firstListenUrl += `&username=${encodeURIComponent(currentUsername)}`;
+        }
+        if (spotifyProfileId) {
+          firstListenUrl += `&profile_id=${encodeURIComponent(spotifyProfileId)}`;
+        }
         if (track.hintTimestamp) {
           firstListenUrl += `&hint_timestamp=${encodeURIComponent(track.hintTimestamp)}`;
         }
-        const res = await fetch(firstListenUrl);
+        const headers = {};
+        if (spotifyToken) headers['X-Spotify-Token'] = spotifyToken;
+        const res = await fetch(firstListenUrl, { headers });
         const body = await res.json();
 
         let data;
@@ -1889,6 +2177,9 @@
           ? `${data.date_unavailable_reason || 'Last.fm does not expose the exact timestamp for this play.'} This can happen when the profile or recent tracks are private, or when Last.fm omits older low-play scrobbles from its public API.`
           : '';
         const lookupTime = formatLookupTime(data);
+        const sourceBadge = data.source === 'spotify'
+          ? '<div class="result-meta-note" style="color:#34d399">📀 Found in your Spotify history</div>'
+          : (data.source === 'lastfm' || !data.source ? '<div class="result-meta-note" style="color:#fbbf24">🎵 Found via Last.fm</div>' : '');
 
         const imageSrc = data.image || defaultAlbumArt();
         const resultNeedsArtistFallback = !data.image;
@@ -1900,6 +2191,7 @@
               <h2>${escHtml(data.track)}</h2>
               <div class="artist-name">${escHtml(data.artist)}</div>
               ${data.album ? `<div class="album-name">${escHtml(data.album)}</div>` : ''}
+              ${sourceBadge}
               ${lookupTime ? `<div class="result-meta-note">${escHtml(lookupTime)}</div>` : ''}
             </div>
           </div>
@@ -1980,6 +2272,12 @@
       const chartWrap = document.getElementById('listening-history-chart-wrap');
       const canvas = document.getElementById('listening-history-chart');
       if (!loadingEl || !chartWrap || !canvas) return;
+      if (!currentUsername) {
+        // Listening-history chart relies on Last.fm weekly charts.
+        const section = document.getElementById('listening-history-section');
+        if (section) section.style.display = 'none';
+        return;
+      }
 
       try {
         const url = `/api/listening-history?username=${encodeURIComponent(currentUsername)}&track=${encodeURIComponent(track)}&artist=${encodeURIComponent(artist)}&months=12`;
@@ -2074,11 +2372,16 @@
 
     async function fetchAndRenderArtistFirstListen(artist) {
       const contentEl = document.getElementById('artist-first-listen-content');
-      if (!contentEl || !currentUsername) return;
+      if (!contentEl) return;
+      if (!currentUsername && !spotifyProfileId) return;
 
       try {
-        const url = `/api/artist-first-listen?username=${encodeURIComponent(currentUsername)}&artist=${encodeURIComponent(artist)}`;
-        const res = await fetch(url);
+        let url = `/api/artist-first-listen?artist=${encodeURIComponent(artist)}`;
+        if (currentUsername) url += `&username=${encodeURIComponent(currentUsername)}`;
+        if (spotifyProfileId) url += `&profile_id=${encodeURIComponent(spotifyProfileId)}`;
+        const headers = {};
+        if (spotifyToken) headers['X-Spotify-Token'] = spotifyToken;
+        const res = await fetch(url, { headers });
         const data = await res.json();
 
         if (data.error) {
