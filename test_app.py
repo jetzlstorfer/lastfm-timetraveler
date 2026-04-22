@@ -677,6 +677,7 @@ class TestDatabaseCaching:
             "queried_at must be updated on a cache hit so the track moves to the top of history"
         )
 
+    @patch.object(app_module, "lastfm_get")
     def test_case_insensitive_cache_hit(self, mock_get, client):
         """Cache hit should work regardless of the casing used in the query."""
         database.save_result(
@@ -1244,18 +1245,80 @@ def _spotify_entry(ts, track="Spot Track", artist="Spot Artist", album="Spot Alb
 
 
 def _spotify_upload(client, profile_id, entries, *, token=None, filename="Streaming_History_Audio_2010.json"):
-    """POST a synthetic Spotify JSON file to /api/spotify/upload."""
+    """POST a synthetic Spotify JSON file to /api/spotify/upload and wait for the
+    background import job to finish.
+
+    The endpoint returns 202 + job_id; we poll /api/spotify/import-progress until
+    the worker finishes, then return a wrapper response object whose `status_code`,
+    `get_json()` and `headers` mimic the old synchronous response shape (so the
+    test assertions stay readable).
+    """
     import io as _io
+    import time as _time
+
     buf = _io.BytesIO(json.dumps(entries).encode("utf-8"))
     headers = {}
     if token:
         headers["X-Spotify-Token"] = token
-    return client.post(
+    post_resp = client.post(
         "/api/spotify/upload",
         data={"profile_id": profile_id, "files": (buf, filename)},
         content_type="multipart/form-data",
         headers=headers,
     )
+    return _await_spotify_import(client, post_resp)
+
+
+def _await_spotify_import(client, post_resp, *, timeout=10.0):
+    """Wait for an async Spotify import to finish and return a flattened response."""
+    import time as _time
+
+    if post_resp.status_code != 202:
+        return post_resp  # pre-flight error (4xx/5xx) — return as-is
+
+    post_body = post_resp.get_json() or {}
+    job_id = post_body.get("job_id")
+    deadline = _time.time() + timeout
+    final = None
+    while _time.time() < deadline:
+        prog = client.get(f"/api/spotify/import-progress?job_id={job_id}")
+        payload = prog.get_json() or {}
+        if payload.get("stage") in ("done", "error"):
+            final = payload
+            break
+        _time.sleep(0.02)
+    assert final is not None, f"spotify import job {job_id} did not finish within {timeout}s"
+
+    if final.get("stage") == "error":
+        flat = {
+            "ok": False,
+            "error": final.get("error") or "Import failed",
+            "job_id": job_id,
+        }
+        status_code = 500
+    else:
+        flat = {
+            "ok": True,
+            "imported": int(final.get("imported", 0)),
+            "filtered": int(final.get("filtered", 0)),
+            "files_processed": int(final.get("files_done", 0)),
+            "stats": final.get("stats", {}),
+            "job_id": job_id,
+        }
+        if "token" in post_body:
+            flat["token"] = post_body["token"]
+        status_code = 200
+
+    class _SyntheticResponse:
+        def __init__(self, status_code, body, headers):
+            self.status_code = status_code
+            self._body = body
+            self.headers = headers
+
+        def get_json(self):
+            return self._body
+
+    return _SyntheticResponse(status_code, flat, post_resp.headers)
 
 
 class TestSpotifyUpload:
@@ -1327,11 +1390,12 @@ class TestSpotifyUpload:
             zf.writestr("Spotify Extended Streaming History/ReadMeFirst.pdf", b"%PDF-")
             zf.writestr("Streaming_History_Audio_2014.json:Zone.Identifier", b"junk")
         zip_buf.seek(0)
-        resp = client.post(
+        post_resp = client.post(
             "/api/spotify/upload",
             data={"profile_id": "zipuser", "files": (zip_buf, "spotify.zip")},
             content_type="multipart/form-data",
         )
+        resp = _await_spotify_import(client, post_resp)
         assert resp.status_code == 200
         body = resp.get_json()
         assert body["imported"] == 2
