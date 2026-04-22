@@ -134,6 +134,10 @@ resource cosmosSpotifyProfilesContainer 'Microsoft.DocumentDB/databaseAccounts/s
         kind: 'Hash'
         version: 2
       }
+      // 90-day TTL: documents auto-expire 90 days after their last write.
+      // The app refreshes the profile on every authenticated access so active
+      // users never lose their data; abandoned profiles age out automatically.
+      defaultTtl: 7776000
     }
   }
 }
@@ -151,6 +155,10 @@ resource cosmosSpotifyPlaysContainer 'Microsoft.DocumentDB/databaseAccounts/sqlD
         kind: 'Hash'
         version: 2
       }
+      // 90-day TTL: play documents auto-expire 90 days after their last write.
+      // Re-uploading the same Spotify export upserts every play and refreshes
+      // its TTL, so users who keep their data fresh keep it indefinitely.
+      defaultTtl: 7776000
     }
   }
 }

@@ -1684,7 +1684,7 @@
         spotifyUploadBar.style.width = '100%';
         spotifyUploadBar.classList.add('bar-processing');
         spotifyUploadStatus.textContent =
-          'Upload complete. Processing on server… parsing JSON, filtering podcasts/short plays, and saving to the database. This can take a moment for large libraries.';
+          'Upload complete. Processing on server… parsing JSON, filtering podcasts/short plays, and saving to the database.';
       };
       xhr.upload.onprogress = (event) => {
         if (event.lengthComputable) {
@@ -1700,31 +1700,24 @@
         switchToProcessing();
       };
       xhr.onload = () => {
-        spotifyUploadBtn.disabled = false;
-        spotifyUploadBar.classList.remove('bar-processing');
         let body;
         try { body = JSON.parse(xhr.responseText); } catch { body = null; }
-        if (xhr.status >= 200 && xhr.status < 300 && body && body.ok) {
+        if (xhr.status === 202 && body && body.ok && body.job_id) {
+          // Async path: stash the issued token (if any) and start polling.
           if (body.token) {
             spotifyToken = body.token;
             setCookie('spotify_token', spotifyToken);
           }
           spotifyProfileId = profileId;
           setCookie('spotify_profile_id', spotifyProfileId);
-          spotifyHasData = true;
-          spotifyStats = body.stats || null;
-          const fileWord = body.files_processed === 1 ? 'file' : 'files';
-          const filteredTip = `<span class="info-tip" title="Plays excluded from import: podcasts/audiobooks (no track metadata) and very short plays (under 30 seconds). This matches Spotify's own counting threshold." aria-label="What does filtered mean?">?</span>`;
-          spotifyUploadStatus.innerHTML =
-            `Imported <strong>${body.imported.toLocaleString()}</strong> plays from ${body.files_processed} ${fileWord} ` +
-            `(<strong>${body.filtered.toLocaleString()}</strong> filtered${filteredTip}).`;
-          spotifyUploadBar.style.width = '100%';
-          renderSpotifyConnected();
-          enterSearchMode();
-        } else {
-          const msg = (body && body.error) || `Upload failed (HTTP ${xhr.status}).`;
-          spotifyUploadStatus.textContent = msg;
+          pollSpotifyImport(body.job_id, profileId);
+          return;
         }
+        // Either a synchronous error response (4xx/5xx) or an unexpected shape.
+        spotifyUploadBtn.disabled = false;
+        spotifyUploadBar.classList.remove('bar-processing');
+        const msg = (body && body.error) || `Upload failed (HTTP ${xhr.status}).`;
+        spotifyUploadStatus.textContent = msg;
       };
       xhr.onerror = () => {
         spotifyUploadBtn.disabled = false;
@@ -1732,6 +1725,65 @@
         spotifyUploadStatus.textContent = 'Upload failed (network error).';
       };
       xhr.send(fd);
+    }
+
+    async function pollSpotifyImport(jobId, profileId) {
+      // Poll every 1.5s until the worker reports done/error. The server keeps
+      // job state for ~10 min after completion so transient network blips are
+      // recoverable.
+      const filteredTip = `<span class="info-tip" title="Plays excluded from import: podcasts/audiobooks (no track metadata) and very short plays (under 30 seconds). This matches Spotify's own counting threshold." aria-label="What does filtered mean?">?</span>`;
+      let lastError = '';
+      while (true) {
+        let payload = null;
+        try {
+          const res = await fetch(`/api/spotify/import-progress?job_id=${encodeURIComponent(jobId)}`);
+          payload = await res.json();
+          if (!res.ok) {
+            lastError = (payload && payload.error) || `Progress check failed (HTTP ${res.status}).`;
+            break;
+          }
+        } catch (err) {
+          lastError = 'Lost connection to the server while importing. Refresh to check progress.';
+          break;
+        }
+        const imported = Number(payload.imported || 0);
+        const filtered = Number(payload.filtered || 0);
+        const filesDone = Number(payload.files_done || 0);
+        const filesTotal = Number(payload.files_total || 0);
+        const fileWord = filesTotal === 1 ? 'file' : 'files';
+
+        if (payload.stage === 'done') {
+          spotifyUploadBtn.disabled = false;
+          spotifyUploadBar.classList.remove('bar-processing');
+          spotifyUploadBar.style.width = '100%';
+          spotifyHasData = true;
+          spotifyStats = payload.stats || null;
+          spotifyUploadStatus.innerHTML =
+            `Imported <strong>${imported.toLocaleString()}</strong> plays from ${filesDone} ${fileWord} ` +
+            `(<strong>${filtered.toLocaleString()}</strong> filtered${filteredTip}).`;
+          renderSpotifyConnected();
+          enterSearchMode();
+          return;
+        }
+        if (payload.stage === 'error') {
+          spotifyUploadBtn.disabled = false;
+          spotifyUploadBar.classList.remove('bar-processing');
+          spotifyUploadStatus.textContent = `Import failed: ${payload.error || 'Unknown error.'}`;
+          return;
+        }
+
+        // Still importing — show live counts.
+        const fileMsg = filesTotal > 1 ? ` · file ${Math.min(filesDone + 1, filesTotal)}/${filesTotal}` : '';
+        const currentFile = payload.current_file ? ` (${payload.current_file.split('::').pop()})` : '';
+        spotifyUploadStatus.textContent =
+          `Saving to database… ${imported.toLocaleString()} plays imported, ` +
+          `${filtered.toLocaleString()} filtered${fileMsg}${currentFile}`;
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+
+      spotifyUploadBtn.disabled = false;
+      spotifyUploadBar.classList.remove('bar-processing');
+      spotifyUploadStatus.textContent = lastError;
     }
 
     connectBtn.addEventListener('click', () => {

@@ -58,6 +58,7 @@ The same `database.py` API is used regardless of backend. Backend selection is a
    - `COSMOS_CONNECTION_STRING` *(or `COSMOS_ENDPOINT` + `COSMOS_KEY`)* — switch persistence to Azure Cosmos DB.
    - `COSMOS_DATABASE_NAME` / `COSMOS_CONTAINER_NAME` — override default Cosmos names.
    - `SPOTIFY_BULK_INSERT_WORKERS` — parallelism when bulk-inserting Spotify plays into Cosmos (default: `16`).
+   - `SPOTIFY_TOUCH_INTERVAL_SECONDS` — minimum interval between profile-TTL refresh writes on Cosmos (default: `3600`, i.e. once per hour). See [Data retention](#data-retention).
 
 3. **Install & run**:
    ```bash
@@ -100,6 +101,16 @@ Each play in the export becomes one row, after filtering:
 - **Music only** — podcasts and audiobooks (where `master_metadata_track_name` is null) are skipped.
 - **30-second minimum** — plays under 30 s are skipped, matching Spotify's own counting threshold. The "filtered" number you see after upload is the count of plays excluded for these reasons.
 - **Re-uploads are deduplicated** — a deterministic per-play ID means uploading the same file twice doesn't create duplicates.
+
+### Data retention
+
+When the Cosmos DB backend is in use (production), Spotify data has a **90-day TTL** that is refreshed on every authenticated access:
+
+- The profile document's TTL is bumped on each successful request you make (throttled to once per `SPOTIFY_TOUCH_INTERVAL_SECONDS`, default 1 hour).
+- Play documents' TTLs are refreshed by re-uploading your Spotify export — the deterministic dedup means it's a safe no-op for plays you already have.
+- If you stop using the app for 90 days, your imported data is automatically deleted. Re-upload at any time to restore it.
+
+The local SQLite backend has no expiry — data lives until you delete the file or click **Disconnect**.
 
 ### How lookup works with both sources
 

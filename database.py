@@ -15,7 +15,7 @@ import re
 import sqlite3
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 try:
@@ -33,6 +33,10 @@ DEFAULT_COSMOS_CONTAINER_NAME = "searches"
 COSMOS_SPOTIFY_PROFILES_CONTAINER = "spotify_profiles"
 COSMOS_SPOTIFY_PLAYS_CONTAINER = "spotify_plays"
 SPOTIFY_BULK_INSERT_WORKERS = int(os.getenv("SPOTIFY_BULK_INSERT_WORKERS", "16"))
+# How often (seconds) to refresh a profile's TTL on access. The Cosmos
+# container has a 90-day TTL; touching less often than once a day would risk
+# expiry, more often is wasted writes.
+SPOTIFY_TOUCH_INTERVAL_SECONDS = int(os.getenv("SPOTIFY_TOUCH_INTERVAL_SECONDS", "3600"))
 SQLITE_TIMEOUT_SECONDS = 30
 INIT_DB_MAX_ATTEMPTS = 3
 INIT_DB_RETRY_DELAY_SECONDS = 0.25
@@ -275,13 +279,15 @@ def _spotify_play_doc_id(profile_id: str, played_at: str, track: str, artist: st
 
 
 def _spotify_profile_doc(profile_id: str, token_hash: str) -> dict:
+    now_iso = datetime.now(timezone.utc).isoformat()
     return {
         "id": _normalize_lookup_value(profile_id),
         "type": "spotify_profile",
         "profile_id": profile_id,
         "profile_id_normalized": _normalize_lookup_value(profile_id),
         "token_hash": token_hash,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": now_iso,
+        "last_accessed_at": now_iso,
     }
 
 
@@ -785,7 +791,12 @@ def spotify_profile_exists(profile_id: str) -> bool:
 
 
 def verify_spotify_token(profile_id: str, token_hash: str) -> bool:
-    """Return True iff *(profile_id, token_hash)* matches a stored profile."""
+    """Return True iff *(profile_id, token_hash)* matches a stored profile.
+
+    On a successful Cosmos verification, this also refreshes the profile's
+    `last_accessed_at` (and TTL) at most once per `SPOTIFY_TOUCH_INTERVAL_SECONDS`,
+    so active users never lose their data to the 90-day TTL.
+    """
     if not profile_id or not token_hash:
         return False
     if _use_cosmos_backend():
@@ -795,7 +806,10 @@ def verify_spotify_token(profile_id: str, token_hash: str) -> bool:
             item = container.read_item(item=normalized, partition_key=normalized)
         except cosmos_exceptions.CosmosResourceNotFoundError:
             return False
-        return (item.get("token_hash") or "") == token_hash
+        if (item.get("token_hash") or "") != token_hash:
+            return False
+        _maybe_touch_spotify_profile(container, item)
+        return True
 
     _sqlite_init_db()
     with _sqlite_connect() as conn:
@@ -806,6 +820,29 @@ def verify_spotify_token(profile_id: str, token_hash: str) -> bool:
     if not row:
         return False
     return (row["token_hash"] or "") == token_hash
+
+
+def _maybe_touch_spotify_profile(container, item: dict) -> None:
+    """Refresh `last_accessed_at` on the profile doc to extend its TTL.
+
+    Throttled by `SPOTIFY_TOUCH_INTERVAL_SECONDS` so we don't write on every
+    request. Failures are silently swallowed — the worst case is the profile
+    expires after 90 days of inactivity, which is the desired behavior anyway.
+    """
+    now = datetime.now(timezone.utc)
+    last = item.get("last_accessed_at") or item.get("created_at") or ""
+    if last:
+        try:
+            last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+            if (now - last_dt).total_seconds() < SPOTIFY_TOUCH_INTERVAL_SECONDS:
+                return
+        except ValueError:
+            pass
+    item["last_accessed_at"] = now.isoformat()
+    try:
+        container.upsert_item(body=item)
+    except Exception:  # noqa: BLE001 — best-effort, never block the request
+        pass
 
 
 def save_spotify_plays(profile_id: str, plays: list[dict]) -> int:
@@ -819,25 +856,36 @@ def save_spotify_plays(profile_id: str, plays: list[dict]) -> int:
 
     if _use_cosmos_backend():
         container = _spotify_plays_container()
-        docs = [_spotify_play_doc(profile_id, p) for p in plays]
-        inserted = 0
+        normalized = _normalize_lookup_value(profile_id)
+        # Count existing plays so we can report how many are *new* this upload.
+        # Re-uploads still upsert every doc, which refreshes their 90-day TTL.
+        before_items = list(container.query_items(
+            query="SELECT VALUE COUNT(1) FROM c WHERE c.profile_id_normalized = @p",
+            parameters=[{"name": "@p", "value": normalized}],
+            partition_key=normalized,
+        ))
+        before = int(before_items[0]) if before_items else 0
 
-        def _insert_one(doc):
+        docs = [_spotify_play_doc(profile_id, p) for p in plays]
+
+        def _upsert_one(doc):
             try:
-                container.create_item(body=doc)
-                return True
-            except cosmos_exceptions.CosmosResourceExistsError:
-                return False
+                container.upsert_item(body=doc)
             except cosmos_exceptions.CosmosHttpResponseError:
                 # SDK already retries 429s; surface other errors as a skip.
                 return False
+            return True
 
         with ThreadPoolExecutor(max_workers=max(1, SPOTIFY_BULK_INSERT_WORKERS)) as ex:
-            futures = [ex.submit(_insert_one, d) for d in docs]
-            for fut in as_completed(futures):
-                if fut.result():
-                    inserted += 1
-        return inserted
+            list(ex.map(_upsert_one, docs))
+
+        after_items = list(container.query_items(
+            query="SELECT VALUE COUNT(1) FROM c WHERE c.profile_id_normalized = @p",
+            parameters=[{"name": "@p", "value": normalized}],
+            partition_key=normalized,
+        ))
+        after = int(after_items[0]) if after_items else before
+        return max(0, after - before)
 
     _sqlite_init_db()
     rows = [

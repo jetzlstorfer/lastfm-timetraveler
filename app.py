@@ -6,6 +6,7 @@ import re
 import secrets
 import time
 import logging
+import tempfile
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock, Thread
@@ -80,6 +81,16 @@ ARTIST_YEAR_CHART_RE = re.compile(
 LASTFM_PLACEHOLDER_HASH = "2a96cbd8b46e442fc41c2b86b821562f"
 LOOKUP_PROGRESS: dict[str, dict] = {}
 LOOKUP_PROGRESS_LOCK = Lock()
+
+# ---- Spotify import jobs (async upload pipeline) ---------------------------
+# Spotify imports run in a background thread so the HTTP request doesn't sit
+# open for minutes (Azure Container Apps ingress kills requests after ~4 min,
+# producing 504s for large libraries). The client receives a job_id and polls
+# /api/spotify/import-progress for status.
+SPOTIFY_IMPORT_JOBS: dict[str, dict] = {}
+SPOTIFY_IMPORT_JOBS_LOCK = Lock()
+SPOTIFY_IMPORT_JOB_TTL_SECONDS = 30 * 60
+SPOTIFY_IMPORT_JOB_DONE_TTL_SECONDS = 10 * 60
 
 
 def is_placeholder(url: str) -> bool:
@@ -204,6 +215,64 @@ def get_lookup_progress_payload(lookup_id: str | None) -> dict | None:
         cleanup_lookup_progress()
         payload = LOOKUP_PROGRESS.get(lookup_id)
         return payload.copy() if payload else None
+
+
+def cleanup_spotify_import_jobs(now: float | None = None) -> None:
+    if now is None:
+        now = time.time()
+    expired: list[str] = []
+    for job_id, payload in SPOTIFY_IMPORT_JOBS.items():
+        ttl = (
+            SPOTIFY_IMPORT_JOB_DONE_TTL_SECONDS
+            if not payload.get("active", True)
+            else SPOTIFY_IMPORT_JOB_TTL_SECONDS
+        )
+        updated_at = payload.get("updated_at", payload.get("created_at", now))
+        if now - updated_at > ttl:
+            expired.append(job_id)
+    for job_id in expired:
+        SPOTIFY_IMPORT_JOBS.pop(job_id, None)
+
+
+def update_spotify_import_job(job_id: str | None, **fields) -> None:
+    if not job_id:
+        return
+    now = time.time()
+    with SPOTIFY_IMPORT_JOBS_LOCK:
+        cleanup_spotify_import_jobs(now)
+        payload = SPOTIFY_IMPORT_JOBS.get(job_id, {}).copy()
+        for k, v in fields.items():
+            if v is None:
+                continue
+            payload[k] = v
+        payload["job_id"] = job_id
+        payload["updated_at"] = now
+        payload.setdefault("created_at", now)
+        payload.setdefault("active", True)
+        SPOTIFY_IMPORT_JOBS[job_id] = payload
+
+
+def get_spotify_import_job(job_id: str | None) -> dict | None:
+    if not job_id:
+        return None
+    with SPOTIFY_IMPORT_JOBS_LOCK:
+        cleanup_spotify_import_jobs()
+        payload = SPOTIFY_IMPORT_JOBS.get(job_id)
+        return payload.copy() if payload else None
+
+
+def increment_spotify_import_job(job_id: str | None, **deltas) -> None:
+    """Atomically add to numeric counters on a job (e.g. imported, filtered)."""
+    if not job_id:
+        return
+    now = time.time()
+    with SPOTIFY_IMPORT_JOBS_LOCK:
+        payload = SPOTIFY_IMPORT_JOBS.get(job_id)
+        if payload is None:
+            return
+        for k, v in deltas.items():
+            payload[k] = int(payload.get(k, 0)) + int(v)
+        payload["updated_at"] = now
 
 
 def should_log_page_progress(page: int, total_pages: int) -> bool:
@@ -953,8 +1022,19 @@ def _iter_spotify_entries(stream, *, size_hint: int | None = None):
             yield item
 
 
-def _spotify_import_file(profile_id: str, filename: str, stream, *, size_hint: int | None = None) -> tuple[int, int, int]:
-    """Import a single Spotify JSON file. Returns (imported, filtered, total_entries)."""
+def _spotify_import_file(
+    profile_id: str,
+    filename: str,
+    stream,
+    *,
+    size_hint: int | None = None,
+    progress_cb=None,
+) -> tuple[int, int, int]:
+    """Import a single Spotify JSON file. Returns (imported, filtered, total_entries).
+
+    `progress_cb`, if given, is called as `progress_cb(imported_delta, filtered_delta)`
+    after every batch so callers can stream incremental progress.
+    """
     batch: list[dict] = []
     imported = 0
     filtered = 0
@@ -964,13 +1044,21 @@ def _spotify_import_file(profile_id: str, filename: str, stream, *, size_hint: i
         play = _spotify_play_from_entry(entry)
         if play is None:
             filtered += 1
+            if progress_cb is not None:
+                progress_cb(0, 1)
             continue
         batch.append(play)
         if len(batch) >= 1000:
-            imported += db.save_spotify_plays(profile_id, batch)
+            inserted = db.save_spotify_plays(profile_id, batch)
+            imported += inserted
+            if progress_cb is not None:
+                progress_cb(inserted, 0)
             batch = []
     if batch:
-        imported += db.save_spotify_plays(profile_id, batch)
+        inserted = db.save_spotify_plays(profile_id, batch)
+        imported += inserted
+        if progress_cb is not None:
+            progress_cb(inserted, 0)
     app.logger.info(
         "spotify import file finished file=%r entries=%s imported=%s filtered=%s",
         filename,
@@ -1008,7 +1096,13 @@ def _spotify_member_is_history(name: str) -> bool:
     return bool(SPOTIFY_FILENAME_RE.search(base))
 
 
-def _spotify_import_zip(profile_id: str, filename: str, stream) -> tuple[int, int, int]:
+def _spotify_import_zip(
+    profile_id: str,
+    filename: str,
+    stream,
+    *,
+    progress_cb=None,
+) -> tuple[int, int, int]:
     """Import a Spotify ZIP archive. Returns (imported, filtered, files_processed)."""
     imported = 0
     filtered = 0
@@ -1037,6 +1131,7 @@ def _spotify_import_zip(profile_id: str, filename: str, stream) -> tuple[int, in
                         f"{filename}::{member.filename}",
                         inner,
                         size_hint=member.file_size,
+                        progress_cb=progress_cb,
                     )
                 imported += fi
                 filtered += ff
@@ -1063,9 +1158,15 @@ def spotify_upload():
       - profile_id: user-chosen display name
       - files: one or more uploaded files (.json or .zip)
 
-    On first upload for a profile a fresh token is generated and returned in
-    the response body and as a SameSite=Lax cookie. Subsequent uploads to the
-    same profile require a valid token (cookie or X-Spotify-Token header).
+    The actual parse + DB import happens in a background thread because
+    large libraries can easily take longer than Azure Container Apps' ingress
+    timeout (~4 min). This endpoint:
+      1. Validates the request and the upload size.
+      2. Streams uploaded files to temp files on disk.
+      3. Issues a token if the profile is brand new.
+      4. Spawns a worker thread and returns HTTP 202 with `{job_id}`.
+
+    The client polls `/api/spotify/import-progress?job_id=` for status.
     """
     profile_id = (request.form.get("profile_id") or "").strip()
     if not profile_id:
@@ -1099,9 +1200,10 @@ def spotify_upload():
     else:
         _verify_spotify_access(profile_id)
 
-    total_imported = 0
-    total_filtered = 0
-    files_processed = 0
+    # Stream uploads to temp files so the worker thread can read them after
+    # the request has returned. We accept .json and .zip; anything else is
+    # skipped silently with a log line (matching previous behavior).
+    saved: list[tuple[str, str, bool]] = []  # (filename, tmp_path, is_zip)
     try:
         for f in files:
             if not f or not f.filename:
@@ -1110,43 +1212,70 @@ def spotify_upload():
             try:
                 f.stream.seek(0)
             except Exception:
-                # Wrap in BytesIO if the stream is not seekable (rare).
+                # Wrap so the rest of the read still succeeds when we copy below.
                 rest = f.stream.read()
                 f.stream = io.BytesIO(head + rest)  # type: ignore[attr-defined]
-            if _looks_like_spotify_zip(f.filename, head):
-                fi, ff, fc = _spotify_import_zip(profile_id, f.filename, f.stream)
-                total_imported += fi
-                total_filtered += ff
-                files_processed += fc
-            elif f.filename.lower().endswith(".json"):
-                fi, ff, _entries = _spotify_import_file(
-                    profile_id,
-                    f.filename,
-                    f.stream,
-                    size_hint=getattr(f, "content_length", None),
-                )
-                total_imported += fi
-                total_filtered += ff
-                files_processed += 1
-            else:
+            is_zip = _looks_like_spotify_zip(f.filename, head)
+            is_json = (not is_zip) and f.filename.lower().endswith(".json")
+            if not (is_zip or is_json):
                 app.logger.info("spotify upload skipped unsupported file=%r", f.filename)
+                continue
+            suffix = ".zip" if is_zip else ".json"
+            tmp = tempfile.NamedTemporaryFile(prefix="spotify-upload-", suffix=suffix, delete=False)
+            try:
+                while True:
+                    chunk = f.stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    tmp.write(chunk)
+            finally:
+                tmp.close()
+            saved.append((f.filename, tmp.name, is_zip))
     except Exception as exc:
-        # If we created the profile in this call but failed mid-import, leave it
-        # so the user can retry with the issued token. Surface the error.
-        app.logger.exception("spotify upload failed profile_id=%r", profile_id)
-        return jsonify({"ok": False, "error": f"Import failed: {exc}"}), 500
+        # Clean up anything we wrote so far, then surface the error.
+        for _, path, _is_zip in saved:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        app.logger.exception("spotify upload failed to buffer files profile_id=%r", profile_id)
+        return jsonify({"ok": False, "error": f"Could not read upload: {exc}"}), 500
 
-    stats = db.get_spotify_stats(profile_id)
+    if not saved:
+        return jsonify({"ok": False, "error": "No supported files in upload (.json or .zip required)"}), 400
+
+    job_id = secrets.token_urlsafe(16)
+    update_spotify_import_job(
+        job_id,
+        profile_id=profile_id,
+        active=True,
+        stage="queued",
+        files_total=len(saved),
+        files_done=0,
+        current_file="",
+        imported=0,
+        filtered=0,
+        error="",
+    )
+
+    worker = Thread(
+        target=_run_spotify_import_job,
+        args=(job_id, profile_id, saved),
+        name=f"spotify-import-{job_id}",
+        daemon=True,
+    )
+    worker.start()
+
     response_body = {
         "ok": True,
-        "imported": total_imported,
-        "filtered": total_filtered,
-        "files_processed": files_processed,
-        "stats": stats,
+        "job_id": job_id,
+        "profile_id": profile_id,
+        "files_queued": len(saved),
     }
     if issued_token:
         response_body["token"] = issued_token
     resp = jsonify(response_body)
+    resp.status_code = 202
     if issued_token:
         # Persist the token + profile id in cookies so a returning visitor can
         # auto-reconnect without re-uploading.
@@ -1168,6 +1297,80 @@ def spotify_upload():
             path="/",
         )
     return resp
+
+
+def _run_spotify_import_job(job_id: str, profile_id: str, saved: list[tuple[str, str, bool]]) -> None:
+    """Background worker that parses uploaded files and writes to the DB."""
+    update_spotify_import_job(job_id, stage="importing")
+
+    def _bump(imported_delta: int, filtered_delta: int) -> None:
+        if imported_delta or filtered_delta:
+            increment_spotify_import_job(
+                job_id,
+                imported=imported_delta,
+                filtered=filtered_delta,
+            )
+
+    files_done = 0
+    try:
+        for filename, path, is_zip in saved:
+            update_spotify_import_job(job_id, current_file=filename)
+            try:
+                with open(path, "rb") as fh:
+                    if is_zip:
+                        _spotify_import_zip(profile_id, filename, fh, progress_cb=_bump)
+                    else:
+                        _spotify_import_file(
+                            profile_id,
+                            filename,
+                            fh,
+                            size_hint=os.path.getsize(path),
+                            progress_cb=_bump,
+                        )
+            finally:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            files_done += 1
+            update_spotify_import_job(job_id, files_done=files_done)
+    except Exception as exc:
+        app.logger.exception("spotify import job failed job_id=%s profile_id=%r", job_id, profile_id)
+        update_spotify_import_job(
+            job_id,
+            stage="error",
+            active=False,
+            error=str(exc) or exc.__class__.__name__,
+        )
+        # Make sure any remaining temp files are cleaned up.
+        for _, path, _is_zip in saved:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        return
+
+    stats = db.get_spotify_stats(profile_id)
+    update_spotify_import_job(
+        job_id,
+        stage="done",
+        active=False,
+        current_file="",
+        stats=stats,
+    )
+
+
+@app.route("/api/spotify/import-progress")
+def spotify_import_progress():
+    """Poll endpoint for an in-flight Spotify import job."""
+    job_id = (request.args.get("job_id") or "").strip()
+    if not job_id:
+        return jsonify({"ok": False, "error": "job_id is required"}), 400
+    payload = get_spotify_import_job(job_id)
+    if payload is None:
+        return jsonify({"ok": False, "error": "Unknown or expired job_id"}), 404
+    payload["ok"] = True
+    return jsonify(payload)
 
 
 @app.route("/api/spotify/status")
