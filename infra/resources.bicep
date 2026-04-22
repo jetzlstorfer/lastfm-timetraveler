@@ -39,6 +39,11 @@ var cosmosAccountName = take('cosmos-${normalizedEnvironmentName}-${take(resourc
 var cosmosDatabaseName = 'lastfm-timetraveler'
 var cosmosContainerName = 'searches'
 
+// Container Apps rejects secrets with empty values. Only include the Spotify
+// secrets/env vars when the caller actually provided them, so `azd up` works
+// even before the user registers a Spotify OAuth app.
+var spotifyConfigured = !empty(spotifyClientId) && !empty(spotifyClientSecret) && !empty(spotifyRedirectUri) && !empty(spotifyTokenEncryptionKey)
+
 // ---------------------------------------------------------------------------
 // Log Analytics Workspace (required by Container Apps Environment)
 // ---------------------------------------------------------------------------
@@ -242,7 +247,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           passwordSecretRef: 'acr-password'
         }
       ]
-      secrets: [
+      secrets: concat([
         {
           name: 'acr-password'
           value: acr.listCredentials().passwords[0].value
@@ -255,6 +260,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           name: 'cosmos-connection-string'
           value: cosmosAccount.listConnectionStrings().connectionStrings[0].connectionString
         }
+      ], spotifyConfigured ? [
         {
           name: 'spotify-client-secret'
           value: spotifyClientSecret
@@ -263,7 +269,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           name: 'spotify-token-encryption-key'
           value: spotifyTokenEncryptionKey
         }
-      ]
+      ] : [])
     }
     template: {
       containers: [
@@ -271,7 +277,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           name: 'web'
           // azd replaces this placeholder with the image it builds and pushes to ACR during `azd deploy`.
           image: 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
-          env: [
+          env: concat([
             {
               name: 'LASTFM_API_KEY'
               secretRef: 'lastfm-api-key'
@@ -288,6 +294,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
               name: 'COSMOS_CONTAINER_NAME'
               value: cosmosContainerName
             }
+          ], spotifyConfigured ? [
             {
               name: 'SPOTIFY_CLIENT_ID'
               value: spotifyClientId
@@ -304,7 +311,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
               name: 'SPOTIFY_TOKEN_ENCRYPTION_KEY'
               secretRef: 'spotify-token-encryption-key'
             }
-          ]
+          ] : [])
           resources: {
             cpu: json('0.5')
             memory: '1Gi'
