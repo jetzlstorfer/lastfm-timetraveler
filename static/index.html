@@ -1079,27 +1079,72 @@
           <div class="mt-4 rounded-2xl border border-white/10 bg-white/5 p-4" id="spotify-card">
             <div class="flex items-center justify-between gap-3 flex-wrap">
               <div>
-                <div class="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-300">Spotify import (optional)</div>
+                <div class="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-300">Spotify (optional)</div>
                 <div class="mt-1 text-sm text-stone-300">
-                  Upload your <em>Spotify Extended Streaming History</em> to use it as the primary source.
-                  <a class="text-emerald-300 hover:text-emerald-200 underline" href="https://www.spotify.com/account/privacy/" target="_blank" rel="noreferrer">Request your data &rarr;</a>
+                  Log in with Spotify to use your listening data alongside Last.fm. Same login on any device.
                 </div>
               </div>
               <div id="spotify-status" class="text-xs text-stone-400">Not connected</div>
             </div>
-            <div id="spotify-form" class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-              <input id="spotify-profile-input" class="field-input flex-1 px-3 py-2 text-sm" type="text" placeholder="Display name (e.g. your Spotify username)" autocomplete="off" />
-              <input id="spotify-files-input" class="text-xs text-stone-300 file:mr-3 file:rounded-md file:border-0 file:bg-emerald-600/80 file:px-3 file:py-2 file:text-xs file:text-white hover:file:bg-emerald-500" type="file" accept=".json,.zip" multiple />
-              <button id="spotify-upload-btn" class="primary-button px-4 py-2 text-sm" type="button">Upload</button>
+
+            <!-- Logged-out state: Login button -->
+            <div id="spotify-login-section" class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div class="text-xs text-stone-400">
+                We'll only ask for read access to your profile and recent plays.
+              </div>
+              <button id="spotify-login-btn" type="button"
+                class="inline-flex items-center gap-2 rounded-full bg-[#1DB954] px-4 py-2 text-sm font-semibold text-black hover:bg-[#1ed760] disabled:opacity-50">
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="currentColor"><path d="M12 0a12 12 0 1 0 0 24 12 12 0 0 0 0-24zm5.5 17.3a.75.75 0 0 1-1 .25c-2.8-1.7-6.3-2-10.4-1.1a.75.75 0 1 1-.3-1.5c4.5-1 8.4-.6 11.5 1.3.4.3.5.7.2 1zm1.5-3.4a.94.94 0 0 1-1.3.3c-3.2-2-8-2.5-11.8-1.4a.94.94 0 1 1-.5-1.8c4.4-1.3 9.7-.7 13.4 1.6.4.3.6.9.2 1.3zm.1-3.5C15.4 8.3 8.5 8 5 9.1A1.13 1.13 0 1 1 4.4 7c4-1.2 11.6-1 15.7 1.5a1.13 1.13 0 0 1-1 2z"/></svg>
+                <span>Log in with Spotify</span>
+              </button>
             </div>
-            <div id="spotify-upload-status" class="mt-2 text-xs text-stone-400" aria-live="polite"></div>
-            <div id="spotify-upload-progress" class="mt-1 hidden">
-              <div class="h-1.5 w-full overflow-hidden rounded-full bg-white/10"><div id="spotify-upload-bar" class="h-full w-0 bg-emerald-500 transition-all"></div></div>
+
+            <!-- OAuth-not-configured state: shown when the server has no Spotify credentials. -->
+            <div id="spotify-not-configured" class="mt-3 hidden rounded-xl border border-amber-400/30 bg-amber-500/10 p-3 text-xs text-amber-100">
+              <div class="font-semibold text-amber-200">Spotify login not configured on this server.</div>
+              <div class="mt-1 text-amber-100/80">
+                Set <code class="rounded bg-black/30 px-1">SPOTIFY_CLIENT_ID</code>,
+                <code class="rounded bg-black/30 px-1">SPOTIFY_CLIENT_SECRET</code>,
+                <code class="rounded bg-black/30 px-1">SPOTIFY_REDIRECT_URI</code> and
+                <code class="rounded bg-black/30 px-1">SPOTIFY_TOKEN_ENCRYPTION_KEY</code>
+                in your <code class="rounded bg-black/30 px-1">.env</code> and restart. See the README for setup steps.
+              </div>
             </div>
-            <div id="spotify-connected" class="mt-3 hidden flex items-center justify-between gap-3 flex-wrap">
-              <div class="text-sm text-stone-200" id="spotify-connected-text"></div>
-              <button id="spotify-disconnect-btn" class="ghost-button px-3 py-1.5 text-xs" type="button">Clear &amp; disconnect</button>
+
+            <!-- Logged-in state: profile + actions -->
+            <div id="spotify-account" class="mt-3 hidden flex-col gap-3">
+              <div class="flex items-center gap-3 flex-wrap">
+                <img id="spotify-avatar" src="" alt="" class="h-10 w-10 rounded-full bg-white/10 object-cover hidden" />
+                <div class="flex-1 min-w-0">
+                  <div class="text-sm font-medium text-white truncate" id="spotify-account-name">—</div>
+                  <div class="text-xs text-stone-400 truncate" id="spotify-account-stats"></div>
+                </div>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <button id="spotify-sync-btn" type="button" class="ghost-button px-3 py-1.5 text-xs">Sync recent plays</button>
+                  <button id="spotify-clear-btn" type="button" class="ghost-button px-3 py-1.5 text-xs">Clear my data</button>
+                  <button id="spotify-logout-btn" type="button" class="ghost-button px-3 py-1.5 text-xs">Log out</button>
+                </div>
+              </div>
+
+              <div class="rounded-lg border border-white/10 bg-black/20 p-3">
+                <div class="text-xs font-semibold text-stone-200">Backfill multi-year history</div>
+                <div class="mt-1 text-xs text-stone-400">
+                  Spotify only exposes the ~50 most-recent plays via API. Upload your
+                  <em>Extended Streaming History</em> to get years of data.
+                  <a class="text-emerald-300 hover:text-emerald-200 underline" href="https://www.spotify.com/account/privacy/" target="_blank" rel="noreferrer">Request your export &rarr;</a>
+                </div>
+                <div id="spotify-form" class="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+                  <input id="spotify-files-input" class="text-xs text-stone-300 file:mr-3 file:rounded-md file:border-0 file:bg-emerald-600/80 file:px-3 file:py-2 file:text-xs file:text-white hover:file:bg-emerald-500" type="file" accept=".json,.zip" multiple />
+                  <button id="spotify-upload-btn" class="primary-button px-4 py-2 text-sm" type="button">Upload</button>
+                </div>
+                <div id="spotify-upload-status" class="mt-2 text-xs text-stone-400" aria-live="polite"></div>
+                <div id="spotify-upload-progress" class="mt-1 hidden">
+                  <div class="h-1.5 w-full overflow-hidden rounded-full bg-white/10"><div id="spotify-upload-bar" class="h-full w-0 bg-emerald-500 transition-all"></div></div>
+                </div>
+              </div>
             </div>
+
+            <div id="spotify-error" class="mt-3 hidden rounded-md border border-red-500/40 bg-red-500/10 p-2 text-xs text-red-200" aria-live="polite"></div>
           </div>
         </div>
 
@@ -1237,24 +1282,35 @@
     let configOk = false;
     let currentUsername = '';
 
-    // Spotify connection state
+    // Spotify connection state. Identity comes from the server-side session
+    // cookie set by /api/spotify/callback; the JS never touches the cookie.
+    let spotifyLoggedIn = false;
     let spotifyProfileId = '';
-    let spotifyToken = '';
+    let spotifyDisplayName = '';
+    let spotifyAvatarUrl = '';
     let spotifyHasData = false;
     let spotifyStats = null;
+    let spotifyOAuthConfigured = false;
 
     const spotifyCard = document.getElementById('spotify-card');
+    const spotifyLoginSection = document.getElementById('spotify-login-section');
+    const spotifyNotConfigured = document.getElementById('spotify-not-configured');
+    const spotifyLoginBtn = document.getElementById('spotify-login-btn');
+    const spotifyAccount = document.getElementById('spotify-account');
+    const spotifyAccountName = document.getElementById('spotify-account-name');
+    const spotifyAccountStats = document.getElementById('spotify-account-stats');
+    const spotifyAvatar = document.getElementById('spotify-avatar');
+    const spotifySyncBtn = document.getElementById('spotify-sync-btn');
+    const spotifyClearBtn = document.getElementById('spotify-clear-btn');
+    const spotifyLogoutBtn = document.getElementById('spotify-logout-btn');
     const spotifyForm = document.getElementById('spotify-form');
-    const spotifyProfileInput = document.getElementById('spotify-profile-input');
     const spotifyFilesInput = document.getElementById('spotify-files-input');
     const spotifyUploadBtn = document.getElementById('spotify-upload-btn');
     const spotifyUploadStatus = document.getElementById('spotify-upload-status');
     const spotifyUploadProgress = document.getElementById('spotify-upload-progress');
     const spotifyUploadBar = document.getElementById('spotify-upload-bar');
     const spotifyStatusEl = document.getElementById('spotify-status');
-    const spotifyConnected = document.getElementById('spotify-connected');
-    const spotifyConnectedText = document.getElementById('spotify-connected-text');
-    const spotifyDisconnectBtn = document.getElementById('spotify-disconnect-btn');
+    const spotifyErrorEl = document.getElementById('spotify-error');
 
     const loadingScreen = document.getElementById('loading-screen');
     const yearCounter = document.getElementById('year-counter');
@@ -1561,8 +1617,16 @@
           connectBtn.disabled = true;
         } else {
           configOk = true;
-          // Auto-reconnect Spotify if cookies are present.
-          await tryAutoReconnectSpotify();
+          // Surface any OAuth error redirected back from /api/spotify/callback.
+          const params = new URLSearchParams(location.search);
+          const oauthErr = params.get('spotify_error');
+          if (oauthErr) {
+            showSpotifyError(`Spotify login failed: ${oauthErr}`);
+            // Strip the query so a refresh doesn't keep showing it.
+            history.replaceState(null, '', location.pathname);
+          }
+          // Refresh Spotify session state from the server (cookie is HttpOnly).
+          await refreshSpotifyStatus();
           const saved = getCookie('lastfm_username');
           if (saved) {
             usernameInput.value = saved;
@@ -1578,49 +1642,80 @@
       }
     })();
 
-    async function tryAutoReconnectSpotify() {
-      const profileId = getCookie('spotify_profile_id');
-      const token = getCookie('spotify_token');
-      if (!profileId || !token) return;
+    async function refreshSpotifyStatus() {
       try {
-        const res = await fetch(`/api/spotify/status?profile_id=${encodeURIComponent(profileId)}`, {
-          headers: { 'X-Spotify-Token': token },
-        });
-        if (!res.ok) {
-          // Stale cookie — clear it.
-          setCookie('spotify_profile_id', '', -1);
-          setCookie('spotify_token', '', -1);
-          return;
-        }
+        const res = await fetch('/api/spotify/status');
+        if (!res.ok) return;
         const body = await res.json();
-        if (body.ok) {
-          spotifyProfileId = profileId;
-          spotifyToken = token;
+        if (!body.ok) return;
+        spotifyOAuthConfigured = !!body.oauth_configured;
+        spotifyLoggedIn = !!body.logged_in;
+        if (spotifyLoggedIn) {
+          spotifyProfileId = body.profile_id || '';
+          spotifyDisplayName = body.display_name || spotifyProfileId;
+          spotifyAvatarUrl = body.avatar_url || '';
           spotifyHasData = !!body.has_data;
           spotifyStats = body.stats || null;
-          renderSpotifyConnected();
+        } else {
+          spotifyProfileId = '';
+          spotifyDisplayName = '';
+          spotifyAvatarUrl = '';
+          spotifyHasData = false;
+          spotifyStats = null;
         }
+        renderSpotifyCard();
       } catch {
-        // network error; ignore and let the user re-upload if needed.
+        // Network blip — leave UI as-is.
       }
     }
 
-    function renderSpotifyConnected() {
-      if (!spotifyProfileId || !spotifyToken) {
-        spotifyForm.classList.remove('hidden');
-        spotifyConnected.classList.add('hidden');
-        spotifyStatusEl.textContent = 'Not connected';
+    function renderSpotifyCard() {
+      // Always show the card so users see the Spotify section exists, even
+      // when OAuth isn't configured on the server.
+      spotifyCard.classList.remove('hidden');
+      if (!spotifyOAuthConfigured) {
+        spotifyLoginSection.classList.add('hidden');
+        spotifyAccount.classList.add('hidden');
+        spotifyAccount.classList.remove('flex');
+        spotifyNotConfigured.classList.remove('hidden');
+        spotifyStatusEl.textContent = 'Not configured';
+        spotifyStatusEl.classList.remove('text-emerald-300');
         return;
       }
-      spotifyForm.classList.add('hidden');
-      spotifyConnected.classList.remove('hidden');
-      spotifyConnected.classList.add('flex');
-      const totals = spotifyStats
+      spotifyNotConfigured.classList.add('hidden');
+      if (!spotifyLoggedIn) {
+        spotifyLoginSection.classList.remove('hidden');
+        spotifyAccount.classList.add('hidden');
+        spotifyAccount.classList.remove('flex');
+        spotifyStatusEl.textContent = 'Not connected';
+        spotifyStatusEl.classList.remove('text-emerald-300');
+        return;
+      }
+      spotifyLoginSection.classList.add('hidden');
+      spotifyAccount.classList.remove('hidden');
+      spotifyAccount.classList.add('flex');
+      spotifyAccountName.textContent = spotifyDisplayName;
+      const totals = spotifyStats && spotifyStats.total_plays
         ? `${spotifyStats.total_plays.toLocaleString()} plays · ${spotifyStats.unique_tracks.toLocaleString()} tracks · ${spotifyStats.unique_artists.toLocaleString()} artists`
-        : '';
-      spotifyConnectedText.textContent = `Spotify: ${spotifyProfileId}${totals ? ' — ' + totals : ''}`;
+        : 'No imported data yet';
+      spotifyAccountStats.textContent = totals;
+      if (spotifyAvatarUrl) {
+        spotifyAvatar.src = spotifyAvatarUrl;
+        spotifyAvatar.classList.remove('hidden');
+      } else {
+        spotifyAvatar.classList.add('hidden');
+      }
       spotifyStatusEl.textContent = '✓ Connected';
       spotifyStatusEl.classList.add('text-emerald-300');
+    }
+
+    function showSpotifyError(msg) {
+      spotifyErrorEl.textContent = msg;
+      spotifyErrorEl.classList.remove('hidden');
+    }
+    function clearSpotifyError() {
+      spotifyErrorEl.textContent = '';
+      spotifyErrorEl.classList.add('hidden');
     }
 
     function enterSearchMode() {
@@ -1628,33 +1723,79 @@
       howItWorks.style.display = 'none';
     }
 
-    spotifyUploadBtn.addEventListener('click', () => uploadSpotifyFiles());
-
-    spotifyDisconnectBtn.addEventListener('click', async () => {
-      if (!spotifyProfileId || !spotifyToken) return;
-      if (!confirm('Clear all imported Spotify data and disconnect?')) return;
-      try {
-        await fetch(`/api/spotify/data?profile_id=${encodeURIComponent(spotifyProfileId)}&delete_profile=true`, {
-          method: 'DELETE',
-          headers: { 'X-Spotify-Token': spotifyToken },
-        });
-      } catch {}
-      setCookie('spotify_profile_id', '', -1);
-      setCookie('spotify_token', '', -1);
-      spotifyProfileId = '';
-      spotifyToken = '';
-      spotifyHasData = false;
-      spotifyStats = null;
-      renderSpotifyConnected();
+    spotifyLoginBtn.addEventListener('click', () => {
+      clearSpotifyError();
+      // Full-page navigation so the OAuth state cookie / session cookie are
+      // set on the same origin without needing CORS gymnastics.
+      window.location.href = '/api/spotify/login';
     });
 
+    spotifyLogoutBtn.addEventListener('click', async () => {
+      try {
+        await fetch('/api/spotify/logout', { method: 'POST' });
+      } catch {}
+      spotifyLoggedIn = false;
+      spotifyProfileId = '';
+      spotifyDisplayName = '';
+      spotifyAvatarUrl = '';
+      spotifyHasData = false;
+      spotifyStats = null;
+      renderSpotifyCard();
+    });
+
+    spotifyClearBtn.addEventListener('click', async () => {
+      if (!spotifyLoggedIn) return;
+      if (!confirm('Delete all your imported Spotify plays from this server? You will stay logged in.')) return;
+      try {
+        const res = await fetch('/api/spotify/data', { method: 'DELETE' });
+        const body = await res.json().catch(() => ({}));
+        if (res.ok && body.ok) {
+          spotifyHasData = false;
+          spotifyStats = null;
+          renderSpotifyCard();
+        } else {
+          showSpotifyError(body.error || `Could not clear data (HTTP ${res.status}).`);
+        }
+      } catch {
+        showSpotifyError('Could not reach the server.');
+      }
+    });
+
+    spotifySyncBtn.addEventListener('click', async () => {
+      if (!spotifyLoggedIn) return;
+      clearSpotifyError();
+      const original = spotifySyncBtn.textContent;
+      spotifySyncBtn.disabled = true;
+      spotifySyncBtn.textContent = 'Syncing…';
+      try {
+        const res = await fetch('/api/spotify/sync', { method: 'POST' });
+        const body = await res.json().catch(() => ({}));
+        if (res.ok && body.ok) {
+          spotifyStats = body.stats || spotifyStats;
+          spotifyHasData = (spotifyStats && spotifyStats.total_plays > 0) || spotifyHasData;
+          renderSpotifyCard();
+          spotifyUploadStatus.textContent =
+            `Sync done: fetched ${body.fetched} recent plays, added ${body.imported} new (${body.filtered} filtered).`;
+        } else {
+          showSpotifyError(body.error || `Sync failed (HTTP ${res.status}).`);
+        }
+      } catch {
+        showSpotifyError('Could not reach the server.');
+      } finally {
+        spotifySyncBtn.disabled = false;
+        spotifySyncBtn.textContent = original;
+      }
+    });
+
+    spotifyUploadBtn.addEventListener('click', () => uploadSpotifyFiles());
+
     async function uploadSpotifyFiles() {
-      const profileId = (spotifyProfileInput.value || spotifyProfileId || '').trim();
-      const files = Array.from(spotifyFilesInput.files || []);
-      if (!profileId) {
-        spotifyUploadStatus.textContent = 'Enter a display name first.';
+      if (!spotifyLoggedIn) {
+        showSpotifyError('Log in with Spotify first.');
         return;
       }
+      clearSpotifyError();
+      const files = Array.from(spotifyFilesInput.files || []);
       if (!files.length) {
         spotifyUploadStatus.textContent = 'Select at least one .json or .zip file.';
         return;
@@ -1666,7 +1807,6 @@
       }
 
       const fd = new FormData();
-      fd.append('profile_id', profileId);
       files.forEach((f) => fd.append('files', f));
 
       spotifyUploadBtn.disabled = true;
@@ -1675,11 +1815,8 @@
       spotifyUploadBar.style.width = '0%';
 
       const xhr = new XMLHttpRequest();
-      const url = '/api/spotify/upload';
-      xhr.open('POST', url);
-      if (spotifyToken && spotifyProfileId === profileId) {
-        xhr.setRequestHeader('X-Spotify-Token', spotifyToken);
-      }
+      xhr.open('POST', '/api/spotify/upload');
+      // Cookie is sent automatically; no header needed.
       const switchToProcessing = () => {
         spotifyUploadBar.style.width = '100%';
         spotifyUploadBar.classList.add('bar-processing');
@@ -1695,25 +1832,14 @@
           }
         }
       };
-      xhr.upload.onload = () => {
-        // All bytes sent; the server is now parsing & importing.
-        switchToProcessing();
-      };
+      xhr.upload.onload = () => switchToProcessing();
       xhr.onload = () => {
         let body;
         try { body = JSON.parse(xhr.responseText); } catch { body = null; }
         if (xhr.status === 202 && body && body.ok && body.job_id) {
-          // Async path: stash the issued token (if any) and start polling.
-          if (body.token) {
-            spotifyToken = body.token;
-            setCookie('spotify_token', spotifyToken);
-          }
-          spotifyProfileId = profileId;
-          setCookie('spotify_profile_id', spotifyProfileId);
-          pollSpotifyImport(body.job_id, profileId);
+          pollSpotifyImport(body.job_id);
           return;
         }
-        // Either a synchronous error response (4xx/5xx) or an unexpected shape.
         spotifyUploadBtn.disabled = false;
         spotifyUploadBar.classList.remove('bar-processing');
         const msg = (body && body.error) || `Upload failed (HTTP ${xhr.status}).`;
@@ -1727,10 +1853,7 @@
       xhr.send(fd);
     }
 
-    async function pollSpotifyImport(jobId, profileId) {
-      // Poll every 1.5s until the worker reports done/error. The server keeps
-      // job state for ~10 min after completion so transient network blips are
-      // recoverable.
+    async function pollSpotifyImport(jobId) {
       const filteredTip = `<span class="info-tip" title="Plays excluded from import: podcasts/audiobooks (no track metadata) and very short plays (under 30 seconds). This matches Spotify's own counting threshold." aria-label="What does filtered mean?">?</span>`;
       let lastError = '';
       while (true) {
@@ -1761,7 +1884,7 @@
           spotifyUploadStatus.innerHTML =
             `Imported <strong>${imported.toLocaleString()}</strong> plays from ${filesDone} ${fileWord} ` +
             `(<strong>${filtered.toLocaleString()}</strong> filtered${filteredTip}).`;
-          renderSpotifyConnected();
+          renderSpotifyCard();
           enterSearchMode();
           return;
         }
@@ -1772,7 +1895,6 @@
           return;
         }
 
-        // Still importing — show live counts.
         const fileMsg = filesTotal > 1 ? ` · file ${Math.min(filesDone + 1, filesTotal)}/${filesTotal}` : '';
         const currentFile = payload.current_file ? ` (${payload.current_file.split('::').pop()})` : '';
         spotifyUploadStatus.textContent =
@@ -2071,10 +2193,9 @@
         if (currentUsername) {
           tasks.push(fetch(`/api/search?q=${encodeURIComponent(query)}`).then(r => r.json()).catch(() => []));
         }
-        if (spotifyProfileId && spotifyToken) {
-          tasks.push(fetch(`/api/spotify/search?profile_id=${encodeURIComponent(spotifyProfileId)}&q=${encodeURIComponent(query)}`, {
-            headers: { 'X-Spotify-Token': spotifyToken },
-          }).then(r => r.ok ? r.json() : []).catch(() => []));
+        if (spotifyLoggedIn) {
+          tasks.push(fetch(`/api/spotify/search?q=${encodeURIComponent(query)}`)
+            .then(r => r.ok ? r.json() : []).catch(() => []));
         }
         if (!tasks.length) {
           hideAC();
@@ -2087,7 +2208,7 @@
         let spotifyResults = [];
         let i = 0;
         if (currentUsername) { lastfmResults = results[i++] || []; }
-        if (spotifyProfileId && spotifyToken) { spotifyResults = results[i++] || []; }
+        if (spotifyLoggedIn) { spotifyResults = results[i++] || []; }
 
         // Tag sources, dedupe by normalized track+artist (Spotify wins if connected)
         const seen = new Set();
@@ -2168,15 +2289,13 @@
         if (currentUsername) {
           firstListenUrl += `&username=${encodeURIComponent(currentUsername)}`;
         }
-        if (spotifyProfileId) {
+        if (spotifyLoggedIn && spotifyProfileId) {
           firstListenUrl += `&profile_id=${encodeURIComponent(spotifyProfileId)}`;
         }
         if (track.hintTimestamp) {
           firstListenUrl += `&hint_timestamp=${encodeURIComponent(track.hintTimestamp)}`;
         }
-        const headers = {};
-        if (spotifyToken) headers['X-Spotify-Token'] = spotifyToken;
-        const res = await fetch(firstListenUrl, { headers });
+        const res = await fetch(firstListenUrl);
         const body = await res.json();
 
         let data;
@@ -2425,15 +2544,13 @@
     async function fetchAndRenderArtistFirstListen(artist) {
       const contentEl = document.getElementById('artist-first-listen-content');
       if (!contentEl) return;
-      if (!currentUsername && !spotifyProfileId) return;
+      if (!currentUsername && !spotifyLoggedIn) return;
 
       try {
         let url = `/api/artist-first-listen?artist=${encodeURIComponent(artist)}`;
         if (currentUsername) url += `&username=${encodeURIComponent(currentUsername)}`;
-        if (spotifyProfileId) url += `&profile_id=${encodeURIComponent(spotifyProfileId)}`;
-        const headers = {};
-        if (spotifyToken) headers['X-Spotify-Token'] = spotifyToken;
-        const res = await fetch(url, { headers });
+        if (spotifyLoggedIn && spotifyProfileId) url += `&profile_id=${encodeURIComponent(spotifyProfileId)}`;
+        const res = await fetch(url);
         const data = await res.json();
 
         if (data.error) {

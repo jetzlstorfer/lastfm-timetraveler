@@ -1227,13 +1227,76 @@ class TestArtistFirstListenAutoUpdate:
         assert result["first_listen_date"] == earliest_date[0]
 
 
+
 # ---------------------------------------------------------------------------
 # Spotify integration tests
 # ---------------------------------------------------------------------------
 
+import io as _io  # noqa: E402
+import zipfile  # noqa: E402
+
+# Stable Fernet key for tests (32-byte url-safe base64). The real value comes
+# from SPOTIFY_TOKEN_ENCRYPTION_KEY in production.
+_TEST_FERNET_KEY = "Nwly3UgU6NMXjqGGXt4tvO2eL-L-3gabdD_v3hBcvCU="
+
+
+@pytest.fixture
+def spotify_oauth_env(monkeypatch):
+    """Make _spotify_oauth_configured() return True for tests.
+
+    Patches the module-level constants that app.py reads at import time so
+    /api/spotify/login etc. don't 503.
+    """
+    monkeypatch.setattr(app_module, "SPOTIFY_CLIENT_ID", "test-client-id")
+    monkeypatch.setattr(app_module, "SPOTIFY_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setattr(app_module, "SPOTIFY_REDIRECT_URI", "http://localhost/api/spotify/callback")
+    monkeypatch.setattr(app_module, "SPOTIFY_TOKEN_ENCRYPTION_KEY", _TEST_FERNET_KEY)
+    # Reset in-memory caches between tests.
+    with app_module.SPOTIFY_OAUTH_PENDING_LOCK:
+        app_module.SPOTIFY_OAUTH_PENDING.clear()
+    with app_module.SPOTIFY_ACCESS_TOKENS_LOCK:
+        app_module.SPOTIFY_ACCESS_TOKENS.clear()
+    yield
+
+
+def _login_spotify(client, user_id, *, display_name=None, avatar_url=""):
+    """Walk the OAuth flow end-to-end with mocked Spotify endpoints."""
+    display_name = display_name or user_id
+
+    login_resp = client.get("/api/spotify/login")
+    assert login_resp.status_code == 302
+    location = login_resp.headers["Location"]
+    from urllib.parse import urlparse, parse_qs
+    qs = parse_qs(urlparse(location).query)
+    state = qs["state"][0]
+
+    fake_token = {
+        "access_token": f"access-{user_id}",
+        "refresh_token": f"refresh-{user_id}",
+        "expires_in": 3600,
+        "scope": app_module.SPOTIFY_OAUTH_SCOPES,
+    }
+    me_payload = {
+        "id": user_id,
+        "display_name": display_name,
+        "email": f"{user_id}@example.com",
+        "images": ([{"url": avatar_url}] if avatar_url else []),
+    }
+
+    class _FakeMeResp:
+        status_code = 200
+
+        def json(self):
+            return me_payload
+
+    with patch.object(app_module, "_spotify_request_token", return_value=fake_token), \
+         patch.object(app_module.requests, "get", return_value=_FakeMeResp()):
+        cb = client.get(f"/api/spotify/callback?code=fake-code&state={state}")
+    assert cb.status_code == 302, cb.get_data(as_text=True)
+    return user_id
+
 
 def _spotify_entry(ts, track="Spot Track", artist="Spot Artist", album="Spot Album", ms_played=60000):
-    """Build a single Spotify Extended Streaming History entry."""
     return {
         "ts": ts,
         "platform": "test",
@@ -1244,57 +1307,35 @@ def _spotify_entry(ts, track="Spot Track", artist="Spot Artist", album="Spot Alb
     }
 
 
-def _spotify_upload(client, profile_id, entries, *, token=None, filename="Streaming_History_Audio_2010.json"):
-    """POST a synthetic Spotify JSON file to /api/spotify/upload and wait for the
-    background import job to finish.
-
-    The endpoint returns 202 + job_id; we poll /api/spotify/import-progress until
-    the worker finishes, then return a wrapper response object whose `status_code`,
-    `get_json()` and `headers` mimic the old synchronous response shape (so the
-    test assertions stay readable).
-    """
-    import io as _io
-    import time as _time
-
+def _spotify_upload(client, entries, *, filename="Streaming_History_Audio_2010.json"):
     buf = _io.BytesIO(json.dumps(entries).encode("utf-8"))
-    headers = {}
-    if token:
-        headers["X-Spotify-Token"] = token
     post_resp = client.post(
         "/api/spotify/upload",
-        data={"profile_id": profile_id, "files": (buf, filename)},
+        data={"files": (buf, filename)},
         content_type="multipart/form-data",
-        headers=headers,
     )
     return _await_spotify_import(client, post_resp)
 
 
 def _await_spotify_import(client, post_resp, *, timeout=10.0):
-    """Wait for an async Spotify import to finish and return a flattened response."""
-    import time as _time
-
     if post_resp.status_code != 202:
-        return post_resp  # pre-flight error (4xx/5xx) — return as-is
+        return post_resp
 
     post_body = post_resp.get_json() or {}
     job_id = post_body.get("job_id")
-    deadline = _time.time() + timeout
+    deadline = time.time() + timeout
     final = None
-    while _time.time() < deadline:
+    while time.time() < deadline:
         prog = client.get(f"/api/spotify/import-progress?job_id={job_id}")
         payload = prog.get_json() or {}
         if payload.get("stage") in ("done", "error"):
             final = payload
             break
-        _time.sleep(0.02)
+        time.sleep(0.02)
     assert final is not None, f"spotify import job {job_id} did not finish within {timeout}s"
 
     if final.get("stage") == "error":
-        flat = {
-            "ok": False,
-            "error": final.get("error") or "Import failed",
-            "job_id": job_id,
-        }
+        flat = {"ok": False, "error": final.get("error") or "Import failed", "job_id": job_id}
         status_code = 500
     else:
         flat = {
@@ -1305,8 +1346,6 @@ def _await_spotify_import(client, post_resp, *, timeout=10.0):
             "stats": final.get("stats", {}),
             "job_id": job_id,
         }
-        if "token" in post_body:
-            flat["token"] = post_body["token"]
         status_code = 200
 
     class _SyntheticResponse:
@@ -1321,62 +1360,115 @@ def _await_spotify_import(client, post_resp, *, timeout=10.0):
     return _SyntheticResponse(status_code, flat, post_resp.headers)
 
 
+# ----- OAuth flow tests -----
+
+
+class TestSpotifyOAuth:
+    def test_login_redirects_to_authorize_url(self, client, spotify_oauth_env):
+        resp = client.get("/api/spotify/login")
+        assert resp.status_code == 302
+        loc = resp.headers["Location"]
+        assert loc.startswith(app_module.SPOTIFY_OAUTH_AUTHORIZE_URL)
+        from urllib.parse import urlparse, parse_qs
+        qs = parse_qs(urlparse(loc).query)
+        assert qs["client_id"] == ["test-client-id"]
+        assert qs["response_type"] == ["code"]
+        assert qs["code_challenge_method"] == ["S256"]
+        assert qs["state"][0]
+        assert qs["code_challenge"][0]
+
+    def test_login_returns_503_when_oauth_not_configured(self, client):
+        with patch.object(app_module, "SPOTIFY_CLIENT_ID", ""):
+            resp = client.get("/api/spotify/login")
+        assert resp.status_code == 503
+
+    def test_callback_creates_session_and_profile(self, client, spotify_oauth_env):
+        _login_spotify(client, "alice", display_name="Alice")
+        status = client.get("/api/spotify/status").get_json()
+        assert status["ok"] is True
+        assert status["logged_in"] is True
+        assert status["profile_id"] == "alice"
+        assert status["display_name"] == "Alice"
+        profile = database.get_spotify_profile("alice")
+        assert profile is not None
+        assert profile["display_name"] == "Alice"
+        assert profile["refresh_token_encrypted"]
+        assert profile["refresh_token_encrypted"] != "refresh-alice"
+
+    def test_callback_rejects_unknown_state(self, client, spotify_oauth_env):
+        resp = client.get("/api/spotify/callback?code=x&state=does-not-exist")
+        assert resp.status_code == 400
+
+    def test_logout_clears_session(self, client, spotify_oauth_env):
+        _login_spotify(client, "bob")
+        assert client.get("/api/spotify/status").get_json()["logged_in"] is True
+        out = client.post("/api/spotify/logout")
+        assert out.status_code == 200
+        assert client.get("/api/spotify/status").get_json()["logged_in"] is False
+
+
+# ----- Upload + import tests -----
+
+
 class TestSpotifyUpload:
-    def test_first_upload_creates_profile_and_returns_token(self, client):
+    def test_upload_requires_session(self, client, spotify_oauth_env):
+        resp = client.post(
+            "/api/spotify/upload",
+            data={"files": (_io.BytesIO(b"[]"), "x.json")},
+            content_type="multipart/form-data",
+        )
+        assert resp.status_code == 401
+
+    def test_first_upload_imports_plays(self, client, spotify_oauth_env):
+        _login_spotify(client, "alice")
         entries = [
             _spotify_entry("2010-09-09T11:46:34Z"),
             _spotify_entry("2011-01-02T08:00:00Z"),
         ]
-        resp = _spotify_upload(client, "alice", entries)
+        resp = _spotify_upload(client, entries)
         assert resp.status_code == 200
-        data = resp.get_json()
-        assert data["ok"] is True
-        assert data["imported"] == 2
-        assert data["filtered"] == 0
-        assert "token" in data and len(data["token"]) > 20
-        assert data["stats"]["total_plays"] == 2
-        # Cookie set on response
-        cookies = resp.headers.getlist("Set-Cookie")
-        assert any("spotify_token=" in c for c in cookies)
+        body = resp.get_json()
+        assert body["ok"] is True
+        assert body["imported"] == 2
+        assert body["filtered"] == 0
+        assert body["stats"]["total_plays"] == 2
 
-    def test_short_plays_and_podcasts_filtered(self, client):
+    def test_short_plays_and_podcasts_filtered(self, client, spotify_oauth_env):
+        _login_spotify(client, "alice")
         entries = [
             _spotify_entry("2012-02-02T00:00:00Z", ms_played=1000),  # too short
-            {"ts": "2012-02-03T00:00:00Z", "ms_played": 60000},  # podcast (no track name)
-            _spotify_entry("2012-02-04T00:00:00Z"),  # keep
+            {"ts": "2012-02-03T00:00:00Z", "ms_played": 60000},      # podcast
+            _spotify_entry("2012-02-04T00:00:00Z"),                  # keep
         ]
-        resp = _spotify_upload(client, "alice2", entries)
-        data = resp.get_json()
+        resp = _spotify_upload(client, entries)
+        body = resp.get_json()
         assert resp.status_code == 200
-        assert data["imported"] == 1
-        assert data["filtered"] == 2
+        assert body["imported"] == 1
+        assert body["filtered"] == 2
 
-    def test_reupload_dedupes(self, client):
+    def test_reupload_dedupes(self, client, spotify_oauth_env):
+        _login_spotify(client, "alice")
         entries = [_spotify_entry("2010-09-09T11:46:34Z")]
-        first = _spotify_upload(client, "alice3", entries)
-        token = first.get_json()["token"]
-        second = _spotify_upload(client, "alice3", entries, token=token)
+        first = _spotify_upload(client, entries)
+        assert first.get_json()["imported"] == 1
+        second = _spotify_upload(client, entries)
         assert second.status_code == 200
-        assert second.get_json()["imported"] == 0  # nothing new
+        assert second.get_json()["imported"] == 0
         assert second.get_json()["stats"]["total_plays"] == 1
 
-    def test_reupload_without_token_is_forbidden(self, client):
-        _spotify_upload(client, "alice4", [_spotify_entry("2010-09-09T11:46:34Z")])
-        # Drop the cookie set by the first upload, simulating a fresh visitor.
-        client.delete_cookie("spotify_token", domain="localhost")
-        client.delete_cookie("spotify_profile_id", domain="localhost")
-        resp = client.post(
-            "/api/spotify/upload",
-            data={"profile_id": "alice4", "files": (
-                __import__("io").BytesIO(b"[]"),
-                "Streaming_History_Audio_x.json",
-            )},
-            content_type="multipart/form-data",
-        )
-        assert resp.status_code == 403
+    def test_each_user_isolated(self, client, spotify_oauth_env):
+        _login_spotify(client, "alice")
+        _spotify_upload(client, [_spotify_entry("2011-01-01T00:00:00Z", track="A_track")])
+        client.post("/api/spotify/logout")
+        _login_spotify(client, "bob")
+        status = client.get("/api/spotify/status").get_json()
+        assert status["has_data"] is False
+        _spotify_upload(client, [_spotify_entry("2012-02-02T00:00:00Z", track="B_track")])
+        results = client.get("/api/spotify/search?q=track").get_json()
+        assert all(r["name"] == "B_track" for r in results)
 
-    def test_zip_upload(self, client):
-        import io as _io
+    def test_zip_upload(self, client, spotify_oauth_env):
+        _login_spotify(client, "zipuser")
         entries = [
             _spotify_entry("2014-05-05T12:00:00Z", track="ZipTrack"),
             _spotify_entry("2015-06-06T12:00:00Z", track="ZipTrack"),
@@ -1392,7 +1484,7 @@ class TestSpotifyUpload:
         zip_buf.seek(0)
         post_resp = client.post(
             "/api/spotify/upload",
-            data={"profile_id": "zipuser", "files": (zip_buf, "spotify.zip")},
+            data={"files": (zip_buf, "spotify.zip")},
             content_type="multipart/form-data",
         )
         resp = _await_spotify_import(client, post_resp)
@@ -1402,132 +1494,45 @@ class TestSpotifyUpload:
         assert body["files_processed"] == 1
 
 
-class TestSpotifyAuth:
-    def test_status_requires_token(self, client):
-        upload = _spotify_upload(client, "bob", [_spotify_entry("2010-01-01T00:00:00Z")])
-        token = upload.get_json()["token"]
-        # Wrong token
-        resp = client.get("/api/spotify/status?profile_id=bob", headers={"X-Spotify-Token": "wrong"})
-        assert resp.status_code == 403
-        # Correct token
-        resp = client.get("/api/spotify/status?profile_id=bob", headers={"X-Spotify-Token": token})
+# ----- Authenticated endpoints -----
+
+
+class TestSpotifyAuthEndpoints:
+    def test_status_logged_out(self, client, spotify_oauth_env):
+        body = client.get("/api/spotify/status").get_json()
+        assert body["ok"] is True
+        assert body["logged_in"] is False
+        assert body["oauth_configured"] is True
+
+    def test_search_requires_session(self, client, spotify_oauth_env):
+        resp = client.get("/api/spotify/search?q=hello")
+        assert resp.status_code == 401
+
+    def test_clear_data_requires_session(self, client, spotify_oauth_env):
+        resp = client.delete("/api/spotify/data")
+        assert resp.status_code == 401
+
+    def test_sync_requires_session(self, client, spotify_oauth_env):
+        resp = client.post("/api/spotify/sync")
+        assert resp.status_code == 401
+
+    def test_clear_data_keeps_session(self, client, spotify_oauth_env):
+        _login_spotify(client, "carl")
+        _spotify_upload(client, [_spotify_entry("2010-01-01T00:00:00Z")])
+        resp = client.delete("/api/spotify/data")
         assert resp.status_code == 200
         body = resp.get_json()
-        assert body["has_data"] is True
-        assert body["stats"]["total_plays"] == 1
+        assert body["deleted"] == 1
+        assert body["profile_deleted"] is False
+        assert client.get("/api/spotify/status").get_json()["logged_in"] is True
 
-    def test_unknown_profile_returns_404(self, client):
-        resp = client.get("/api/spotify/status?profile_id=ghost")
-        assert resp.status_code == 404
-
-    def test_cross_user_isolation(self, client):
-        a = _spotify_upload(client, "userA", [_spotify_entry("2011-01-01T00:00:00Z", track="A_track")])
-        b = _spotify_upload(client, "userB", [_spotify_entry("2012-02-02T00:00:00Z", track="B_track")])
-        token_a = a.get_json()["token"]
-        token_b = b.get_json()["token"]
-        # userA's token cannot read userB's data
-        resp = client.get("/api/spotify/status?profile_id=userB", headers={"X-Spotify-Token": token_a})
-        assert resp.status_code == 403
-        # Each correct token works
-        ra = client.get("/api/spotify/search?profile_id=userA&q=A_track", headers={"X-Spotify-Token": token_a})
-        rb = client.get("/api/spotify/search?profile_id=userB&q=B_track", headers={"X-Spotify-Token": token_b})
-        assert ra.status_code == 200 and len(ra.get_json()) == 1
-        assert rb.status_code == 200 and len(rb.get_json()) == 1
-
-
-class TestSpotifyFirstListen:
-    def test_first_listen_uses_spotify_when_available(self, client):
-        entries = [
-            _spotify_entry("2014-05-05T12:00:00Z", track="MyTrack", artist="MyArtist"),
-            _spotify_entry("2010-03-04T08:00:00Z", track="MyTrack", artist="MyArtist"),
-            _spotify_entry("2018-08-08T20:00:00Z", track="MyTrack", artist="MyArtist"),
-        ]
-        upload = _spotify_upload(client, "spuser", entries)
-        token = upload.get_json()["token"]
-        resp = client.get(
-            "/api/first-listen?track=MyTrack&artist=MyArtist&profile_id=spuser",
-            headers={"X-Spotify-Token": token},
-        )
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert data["found"] is True
-        assert data["source"] == "spotify"
-        assert data["total_scrobbles"] == 3
-        # Earliest of the three
-        assert data["timestamp"] != ""
-        from datetime import datetime as _dt, timezone as _tz
-        assert _dt.fromtimestamp(int(data["timestamp"]), tz=_tz.utc).year == 2010
-
-    def test_first_listen_spotify_only_not_found(self, client):
-        upload = _spotify_upload(client, "spuser2", [_spotify_entry("2010-01-01T00:00:00Z", track="A", artist="B")])
-        token = upload.get_json()["token"]
-        resp = client.get(
-            "/api/first-listen?track=Other&artist=B&profile_id=spuser2",
-            headers={"X-Spotify-Token": token},
-        )
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert data["found"] is False
-        assert data["source"] == "spotify"
-
-    def test_first_listen_falls_back_to_lastfm_when_not_in_spotify(self, client):
-        upload = _spotify_upload(client, "spuser3", [_spotify_entry("2010-01-01T00:00:00Z", track="A", artist="B")])
-        token = upload.get_json()["token"]
-        # The track we ask about isn't in Spotify but Last.fm has it
-        with patch("app.lastfm_get") as mock_get:
-            mock_get.return_value = _track_info_response(0)
-            data, status = _await_first_listen(
-                client,
-                "track=Songname&artist=Artistname&username=lfmuser&profile_id=spuser3",
-                timeout=5,
-            )
-            client.set_cookie(domain="localhost", key="spotify_token", value=token)
-        # Returned 'no listens' result from Last.fm path
-        assert status == 200
-        assert data["found"] is False
-
-    def test_artist_first_listen_prefers_spotify(self, client):
-        entries = [
-            _spotify_entry("2013-04-04T12:00:00Z", track="Track1", artist="ArtistX"),
-            _spotify_entry("2010-01-01T00:00:00Z", track="Track2", artist="ArtistX"),
-        ]
-        upload = _spotify_upload(client, "spuser4", entries)
-        token = upload.get_json()["token"]
-        resp = client.get(
-            "/api/artist-first-listen?artist=ArtistX&profile_id=spuser4",
-            headers={"X-Spotify-Token": token},
-        )
-        assert resp.status_code == 200
-        body = resp.get_json()
-        assert body["source"] == "spotify"
-        assert body["first_listen_track"] == "Track2"
-
-
-class TestSpotifyClearAndSearch:
-    def test_clear_data_removes_history_keeps_profile(self, client):
-        upload = _spotify_upload(client, "carl", [_spotify_entry("2010-01-01T00:00:00Z")])
-        token = upload.get_json()["token"]
-        resp = client.delete(
-            "/api/spotify/data?profile_id=carl",
-            headers={"X-Spotify-Token": token},
-        )
-        assert resp.status_code == 200
-        assert resp.get_json()["deleted"] == 1
-        # Profile still exists, can re-upload
-        resp2 = _spotify_upload(client, "carl", [_spotify_entry("2010-01-01T00:00:00Z")], token=token)
-        assert resp2.status_code == 200
-        assert resp2.get_json()["imported"] == 1
-
-    def test_search_returns_imported_tracks(self, client):
-        upload = _spotify_upload(client, "dana", [
+    def test_search_returns_imported_tracks(self, client, spotify_oauth_env):
+        _login_spotify(client, "dana")
+        _spotify_upload(client, [
             _spotify_entry("2010-01-01T00:00:00Z", track="Hello World", artist="Greetings"),
             _spotify_entry("2010-01-02T00:00:00Z", track="Goodbye Sky", artist="Greetings"),
         ])
-        token = upload.get_json()["token"]
-        resp = client.get(
-            "/api/spotify/search?profile_id=dana&q=hello",
-            headers={"X-Spotify-Token": token},
-        )
+        resp = client.get("/api/spotify/search?q=hello")
         assert resp.status_code == 200
         results = resp.get_json()
         assert len(results) == 1
@@ -1535,6 +1540,87 @@ class TestSpotifyClearAndSearch:
         assert results[0]["source"] == "spotify"
 
 
-# zipfile is needed by the upload tests
-import zipfile  # noqa: E402
+# ----- Sync (recently-played) -----
 
+
+class TestSpotifySync:
+    def test_sync_imports_recently_played(self, client, spotify_oauth_env):
+        _login_spotify(client, "syncer")
+
+        recent_payload = {
+            "items": [
+                {
+                    "track": {
+                        "name": "Recent Track",
+                        "duration_ms": 200000,
+                        "artists": [{"name": "Recent Artist"}],
+                        "album": {"name": "Recent Album"},
+                    },
+                    "played_at": "2024-05-05T10:00:00.000Z",
+                }
+            ]
+        }
+
+        class _FakeResp:
+            status_code = 200
+
+            def json(self):
+                return recent_payload
+
+        with patch.object(app_module, "_get_valid_access_token", return_value="access-syncer"), \
+             patch.object(app_module.requests, "get", return_value=_FakeResp()):
+            resp = client.post("/api/spotify/sync")
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["fetched"] == 1
+        assert body["imported"] == 1
+        assert body["stats"]["total_plays"] == 1
+        prof = database.get_spotify_profile("syncer")
+        assert prof.get("last_sync_at")
+
+    def test_sync_handles_401_from_spotify(self, client, spotify_oauth_env):
+        _login_spotify(client, "syncer2")
+
+        class _Fake401:
+            status_code = 401
+
+            def json(self):
+                return {}
+
+        with patch.object(app_module, "_get_valid_access_token", return_value="access-syncer2"), \
+             patch.object(app_module.requests, "get", return_value=_Fake401()):
+            resp = client.post("/api/spotify/sync")
+        assert resp.status_code == 401
+
+
+# ----- First-listen Spotify path -----
+
+
+class TestSpotifyFirstListen:
+    def test_first_listen_uses_spotify_when_available(self, client, spotify_oauth_env):
+        _login_spotify(client, "spuser")
+        _spotify_upload(client, [
+            _spotify_entry("2014-05-05T12:00:00Z", track="MyTrack", artist="MyArtist"),
+            _spotify_entry("2010-03-04T08:00:00Z", track="MyTrack", artist="MyArtist"),
+            _spotify_entry("2018-08-08T20:00:00Z", track="MyTrack", artist="MyArtist"),
+        ])
+        resp = client.get("/api/first-listen?track=MyTrack&artist=MyArtist")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["found"] is True
+        assert data["source"] == "spotify"
+        assert data["total_scrobbles"] == 3
+        from datetime import datetime as _dt, timezone as _tz
+        assert _dt.fromtimestamp(int(data["timestamp"]), tz=_tz.utc).year == 2010
+
+    def test_artist_first_listen_prefers_spotify(self, client, spotify_oauth_env):
+        _login_spotify(client, "spuser4")
+        _spotify_upload(client, [
+            _spotify_entry("2013-04-04T12:00:00Z", track="Track1", artist="ArtistX"),
+            _spotify_entry("2010-01-01T00:00:00Z", track="Track2", artist="ArtistX"),
+        ])
+        resp = client.get("/api/artist-first-listen?artist=ArtistX")
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["source"] == "spotify"
+        assert body["first_listen_track"] == "Track2"

@@ -16,7 +16,7 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 try:
     from azure.cosmos import CosmosClient, PartitionKey, exceptions as cosmos_exceptions
@@ -32,11 +32,14 @@ DEFAULT_COSMOS_DATABASE_NAME = "lastfm-timetraveler"
 DEFAULT_COSMOS_CONTAINER_NAME = "searches"
 COSMOS_SPOTIFY_PROFILES_CONTAINER = "spotify_profiles"
 COSMOS_SPOTIFY_PLAYS_CONTAINER = "spotify_plays"
+COSMOS_SPOTIFY_SESSIONS_CONTAINER = "spotify_sessions"
 SPOTIFY_BULK_INSERT_WORKERS = int(os.getenv("SPOTIFY_BULK_INSERT_WORKERS", "16"))
 # How often (seconds) to refresh a profile's TTL on access. The Cosmos
 # container has a 90-day TTL; touching less often than once a day would risk
 # expiry, more often is wasted writes.
 SPOTIFY_TOUCH_INTERVAL_SECONDS = int(os.getenv("SPOTIFY_TOUCH_INTERVAL_SECONDS", "3600"))
+# Sessions get a 30-day rolling TTL refreshed on every authenticated access.
+SPOTIFY_SESSION_TTL_SECONDS = int(os.getenv("SPOTIFY_SESSION_TTL_SECONDS", str(30 * 24 * 60 * 60)))
 SQLITE_TIMEOUT_SECONDS = 30
 INIT_DB_MAX_ATTEMPTS = 3
 INIT_DB_RETRY_DELAY_SECONDS = 0.25
@@ -115,6 +118,22 @@ def _is_locked_error(exc: sqlite3.OperationalError) -> bool:
 
 
 def _create_sqlite_schema(conn: sqlite3.Connection) -> None:
+    # Lightweight migration: the Spotify-OAuth rework changed the schema of
+    # spotify_profiles (token_hash -> refresh_token_encrypted) and added
+    # spotify_sessions. Older local DBs created before the rework still have
+    # the old shape, so drop the legacy spotify_* tables before re-creating
+    # them. (No production data exists for this branch — we already wiped
+    # the schema per the migration plan.)
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(spotify_profiles)").fetchall()]
+        if cols and "refresh_token_encrypted" not in cols:
+            conn.execute("DROP TABLE IF EXISTS spotify_profiles")
+            conn.execute("DROP TABLE IF EXISTS spotify_sessions")
+            conn.execute("DROP TABLE IF EXISTS spotify_history")
+    except sqlite3.DatabaseError:
+        # Brand-new DB or unreadable PRAGMA — nothing to migrate.
+        pass
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS searches (
@@ -159,10 +178,32 @@ def _create_sqlite_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS spotify_profiles (
-            profile_id   TEXT PRIMARY KEY,
-            token_hash   TEXT NOT NULL,
-            created_at   TEXT NOT NULL
+            profile_id              TEXT PRIMARY KEY,
+            display_name            TEXT,
+            avatar_url              TEXT,
+            refresh_token_encrypted TEXT,
+            scopes                  TEXT,
+            created_at              TEXT NOT NULL,
+            last_login_at           TEXT,
+            last_sync_at            TEXT
         )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS spotify_sessions (
+            session_id_hash TEXT PRIMARY KEY,
+            profile_id      TEXT NOT NULL,
+            created_at      TEXT NOT NULL,
+            last_used_at    TEXT NOT NULL,
+            expires_at      TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_spotify_sessions_profile
+        ON spotify_sessions (LOWER(profile_id))
         """
     )
     conn.execute(
@@ -267,6 +308,10 @@ def _spotify_plays_container():
     return _get_cosmos_named_container(COSMOS_SPOTIFY_PLAYS_CONTAINER, "/profile_id_normalized")
 
 
+def _spotify_sessions_container():
+    return _get_cosmos_named_container(COSMOS_SPOTIFY_SESSIONS_CONTAINER, "/session_id_hash")
+
+
 def _spotify_play_doc_id(profile_id: str, played_at: str, track: str, artist: str) -> str:
     """Deterministic doc id matches the SQLite dedup index semantics."""
     raw = "|".join([
@@ -278,16 +323,27 @@ def _spotify_play_doc_id(profile_id: str, played_at: str, track: str, artist: st
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
-def _spotify_profile_doc(profile_id: str, token_hash: str) -> dict:
+def _spotify_profile_doc(
+    profile_id: str,
+    *,
+    display_name: str = "",
+    avatar_url: str = "",
+    refresh_token_encrypted: str = "",
+    scopes: str = "",
+) -> dict:
     now_iso = datetime.now(timezone.utc).isoformat()
     return {
         "id": _normalize_lookup_value(profile_id),
         "type": "spotify_profile",
         "profile_id": profile_id,
         "profile_id_normalized": _normalize_lookup_value(profile_id),
-        "token_hash": token_hash,
+        "display_name": display_name or "",
+        "avatar_url": avatar_url or "",
+        "refresh_token_encrypted": refresh_token_encrypted or "",
+        "scopes": scopes or "",
         "created_at": now_iso,
-        "last_accessed_at": now_iso,
+        "last_login_at": now_iso,
+        "last_sync_at": "",
     }
 
 
@@ -752,21 +808,149 @@ def save_artist_first_listen(
 # ---------------------------------------------------------------------------
 
 
-def create_spotify_profile(profile_id: str, token_hash: str) -> None:
-    """Create a new Spotify profile. Raises if it already exists."""
+def upsert_spotify_profile(
+    profile_id: str,
+    *,
+    display_name: str = "",
+    avatar_url: str = "",
+    refresh_token_encrypted: str = "",
+    scopes: str = "",
+) -> None:
+    """Create or update a Spotify profile keyed by Spotify user ID.
+
+    Existing rows have their `display_name`, `avatar_url`, `scopes` and
+    (if non-empty) `refresh_token_encrypted` refreshed; `created_at` is
+    preserved; `last_login_at` is bumped to now.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
     if _use_cosmos_backend():
         container = _spotify_profiles_container()
+        normalized = _normalize_lookup_value(profile_id)
         try:
-            container.create_item(body=_spotify_profile_doc(profile_id, token_hash))
-        except cosmos_exceptions.CosmosResourceExistsError as exc:
-            raise ValueError(f"Spotify profile already exists: {profile_id}") from exc
+            existing = container.read_item(item=normalized, partition_key=normalized)
+        except cosmos_exceptions.CosmosResourceNotFoundError:
+            existing = None
+        if existing is None:
+            doc = _spotify_profile_doc(
+                profile_id,
+                display_name=display_name,
+                avatar_url=avatar_url,
+                refresh_token_encrypted=refresh_token_encrypted,
+                scopes=scopes,
+            )
+        else:
+            doc = existing
+            doc["display_name"] = display_name or doc.get("display_name", "")
+            doc["avatar_url"] = avatar_url or doc.get("avatar_url", "")
+            if scopes:
+                doc["scopes"] = scopes
+            if refresh_token_encrypted:
+                doc["refresh_token_encrypted"] = refresh_token_encrypted
+            doc["last_login_at"] = now_iso
+        container.upsert_item(body=doc)
         return
 
     _sqlite_init_db()
     with _sqlite_connect() as conn:
+        row = conn.execute(
+            "SELECT refresh_token_encrypted FROM spotify_profiles WHERE LOWER(profile_id) = LOWER(?)",
+            (profile_id,),
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """
+                INSERT INTO spotify_profiles
+                    (profile_id, display_name, avatar_url, refresh_token_encrypted,
+                     scopes, created_at, last_login_at, last_sync_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    profile_id,
+                    display_name or "",
+                    avatar_url or "",
+                    refresh_token_encrypted or "",
+                    scopes or "",
+                    now_iso,
+                    now_iso,
+                    "",
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE spotify_profiles
+                SET display_name            = COALESCE(NULLIF(?, ''), display_name),
+                    avatar_url              = COALESCE(NULLIF(?, ''), avatar_url),
+                    scopes                  = COALESCE(NULLIF(?, ''), scopes),
+                    refresh_token_encrypted = COALESCE(NULLIF(?, ''), refresh_token_encrypted),
+                    last_login_at           = ?
+                WHERE LOWER(profile_id) = LOWER(?)
+                """,
+                (display_name or "", avatar_url or "", scopes or "",
+                 refresh_token_encrypted or "", now_iso, profile_id),
+            )
+        conn.commit()
+
+
+def get_spotify_profile(profile_id: str) -> dict | None:
+    """Return the stored profile document, or None."""
+    if _use_cosmos_backend():
+        container = _spotify_profiles_container()
+        normalized = _normalize_lookup_value(profile_id)
+        try:
+            return container.read_item(item=normalized, partition_key=normalized)
+        except cosmos_exceptions.CosmosResourceNotFoundError:
+            return None
+
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM spotify_profiles WHERE LOWER(profile_id) = LOWER(?)",
+            (profile_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def update_spotify_refresh_token(profile_id: str, refresh_token_encrypted: str) -> None:
+    """Persist a rotated refresh token."""
+    if not refresh_token_encrypted:
+        return
+    if _use_cosmos_backend():
+        container = _spotify_profiles_container()
+        normalized = _normalize_lookup_value(profile_id)
+        try:
+            doc = container.read_item(item=normalized, partition_key=normalized)
+        except cosmos_exceptions.CosmosResourceNotFoundError:
+            return
+        doc["refresh_token_encrypted"] = refresh_token_encrypted
+        container.upsert_item(body=doc)
+        return
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
         conn.execute(
-            "INSERT INTO spotify_profiles (profile_id, token_hash, created_at) VALUES (?, ?, ?)",
-            (profile_id, token_hash, datetime.now(timezone.utc).isoformat()),
+            "UPDATE spotify_profiles SET refresh_token_encrypted = ? WHERE LOWER(profile_id) = LOWER(?)",
+            (refresh_token_encrypted, profile_id),
+        )
+        conn.commit()
+
+
+def update_spotify_last_sync(profile_id: str, when_iso: str | None = None) -> None:
+    when_iso = when_iso or datetime.now(timezone.utc).isoformat()
+    if _use_cosmos_backend():
+        container = _spotify_profiles_container()
+        normalized = _normalize_lookup_value(profile_id)
+        try:
+            doc = container.read_item(item=normalized, partition_key=normalized)
+        except cosmos_exceptions.CosmosResourceNotFoundError:
+            return
+        doc["last_sync_at"] = when_iso
+        container.upsert_item(body=doc)
+        return
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        conn.execute(
+            "UPDATE spotify_profiles SET last_sync_at = ? WHERE LOWER(profile_id) = LOWER(?)",
+            (when_iso, profile_id),
         )
         conn.commit()
 
@@ -790,92 +974,150 @@ def spotify_profile_exists(profile_id: str) -> bool:
     return row is not None
 
 
-def spotify_profile_was_accessed(profile_id: str) -> bool:
-    """Return True if the profile has ever been successfully verified.
+# ---- Sessions --------------------------------------------------------------
+# Sessions are server-side rows. The browser cookie carries only an opaque
+# random id whose SHA-256 hash is the document key; raw session ids are never
+# stored, so a DB leak alone cannot impersonate a user.
 
-    Used to detect the "504 orphan" scenario: when a previous upload created
-    the profile and issued a token but the response never reached the client
-    (e.g. ingress timeout), the profile exists but no one ever proved
-    ownership. In that case it's safe to let a fresh upload re-claim it.
+def _hash_session_id(session_id: str) -> str:
+    return hashlib.sha256((session_id or "").encode("utf-8")).hexdigest()
 
-    A profile counts as accessed iff `last_accessed_at` is present and
-    strictly later than `created_at`. The `verify_spotify_token` Cosmos
-    branch is responsible for keeping `last_accessed_at` fresh on every
-    authenticated request.
 
-    SQLite profiles are always considered accessed (the SQLite backend
-    doesn't track this and the local-dev workflow doesn't have the
-    timeout-orphan problem).
-    """
+def create_spotify_session(profile_id: str, session_id: str) -> None:
+    """Store a new session keyed by SHA-256(session_id)."""
+    now = datetime.now(timezone.utc)
+    expires_dt = now + timedelta(seconds=SPOTIFY_SESSION_TTL_SECONDS)
+    sid_hash = _hash_session_id(session_id)
+    doc = {
+        "id": sid_hash,
+        "session_id_hash": sid_hash,
+        "profile_id": profile_id,
+        "created_at": now.isoformat(),
+        "last_used_at": now.isoformat(),
+        "expires_at": expires_dt.isoformat(),
+    }
     if _use_cosmos_backend():
-        container = _spotify_profiles_container()
-        normalized = _normalize_lookup_value(profile_id)
-        try:
-            item = container.read_item(item=normalized, partition_key=normalized)
-        except cosmos_exceptions.CosmosResourceNotFoundError:
-            return False
-        last = (item.get("last_accessed_at") or "").strip()
-        created = (item.get("created_at") or "").strip()
-        if not last:
-            return False
-        return last != created
+        container = _spotify_sessions_container()
+        container.upsert_item(body=doc)
+        return
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO spotify_sessions
+                (session_id_hash, profile_id, created_at, last_used_at, expires_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (sid_hash, profile_id, doc["created_at"], doc["last_used_at"], doc["expires_at"]),
+        )
+        conn.commit()
 
-    return True
 
+def verify_spotify_session(session_id: str) -> str | None:
+    """Return the profile_id (Spotify user id) for a valid session, or None.
 
-def verify_spotify_token(profile_id: str, token_hash: str) -> bool:
-    """Return True iff *(profile_id, token_hash)* matches a stored profile.
-
-    On a successful Cosmos verification, this also refreshes the profile's
-    `last_accessed_at` (and TTL) at most once per `SPOTIFY_TOUCH_INTERVAL_SECONDS`,
-    so active users never lose their data to the 90-day TTL.
+    Touches `last_used_at` and extends `expires_at` so active sessions don't
+    age out. Throttled by SPOTIFY_TOUCH_INTERVAL_SECONDS to limit writes.
     """
-    if not profile_id or not token_hash:
-        return False
+    if not session_id:
+        return None
+    sid_hash = _hash_session_id(session_id)
+    now = datetime.now(timezone.utc)
     if _use_cosmos_backend():
-        container = _spotify_profiles_container()
-        normalized = _normalize_lookup_value(profile_id)
+        container = _spotify_sessions_container()
         try:
-            item = container.read_item(item=normalized, partition_key=normalized)
+            doc = container.read_item(item=sid_hash, partition_key=sid_hash)
         except cosmos_exceptions.CosmosResourceNotFoundError:
-            return False
-        if (item.get("token_hash") or "") != token_hash:
-            return False
-        _maybe_touch_spotify_profile(container, item)
-        return True
+            return None
+        # Honor explicit expiry even if the Cosmos TTL hasn't reaped the doc yet.
+        expires_at = doc.get("expires_at") or ""
+        if expires_at:
+            try:
+                exp_dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                if exp_dt < now:
+                    return None
+            except ValueError:
+                pass
+        last_used = doc.get("last_used_at") or doc.get("created_at") or ""
+        should_touch = True
+        if last_used:
+            try:
+                last_dt = datetime.fromisoformat(last_used.replace("Z", "+00:00"))
+                if (now - last_dt).total_seconds() < SPOTIFY_TOUCH_INTERVAL_SECONDS:
+                    should_touch = False
+            except ValueError:
+                pass
+        if should_touch:
+            doc["last_used_at"] = now.isoformat()
+            doc["expires_at"] = (now + timedelta(seconds=SPOTIFY_SESSION_TTL_SECONDS)).isoformat()
+            try:
+                container.upsert_item(body=doc)
+            except Exception:  # noqa: BLE001
+                pass
+        return doc.get("profile_id") or None
 
     _sqlite_init_db()
     with _sqlite_connect() as conn:
         row = conn.execute(
-            "SELECT token_hash FROM spotify_profiles WHERE LOWER(profile_id) = LOWER(?)",
-            (profile_id,),
+            "SELECT profile_id, expires_at, last_used_at FROM spotify_sessions WHERE session_id_hash = ?",
+            (sid_hash,),
         ).fetchone()
-    if not row:
-        return False
-    return (row["token_hash"] or "") == token_hash
-
-
-def _maybe_touch_spotify_profile(container, item: dict) -> None:
-    """Refresh `last_accessed_at` on the profile doc to extend its TTL.
-
-    Throttled by `SPOTIFY_TOUCH_INTERVAL_SECONDS` so we don't write on every
-    request. Failures are silently swallowed — the worst case is the profile
-    expires after 90 days of inactivity, which is the desired behavior anyway.
-    """
-    now = datetime.now(timezone.utc)
-    last = item.get("last_accessed_at") or item.get("created_at") or ""
-    if last:
+        if not row:
+            return None
         try:
-            last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
-            if (now - last_dt).total_seconds() < SPOTIFY_TOUCH_INTERVAL_SECONDS:
-                return
+            exp_dt = datetime.fromisoformat((row["expires_at"] or "").replace("Z", "+00:00"))
+            if exp_dt < now:
+                return None
         except ValueError:
+            return None
+        new_exp = (now + timedelta(seconds=SPOTIFY_SESSION_TTL_SECONDS)).isoformat()
+        conn.execute(
+            "UPDATE spotify_sessions SET last_used_at = ?, expires_at = ? WHERE session_id_hash = ?",
+            (now.isoformat(), new_exp, sid_hash),
+        )
+        conn.commit()
+        return row["profile_id"]
+
+
+def delete_spotify_session(session_id: str) -> None:
+    if not session_id:
+        return
+    sid_hash = _hash_session_id(session_id)
+    if _use_cosmos_backend():
+        container = _spotify_sessions_container()
+        try:
+            container.delete_item(item=sid_hash, partition_key=sid_hash)
+        except cosmos_exceptions.CosmosResourceNotFoundError:
             pass
-    item["last_accessed_at"] = now.isoformat()
-    try:
-        container.upsert_item(body=item)
-    except Exception:  # noqa: BLE001 — best-effort, never block the request
-        pass
+        return
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        conn.execute("DELETE FROM spotify_sessions WHERE session_id_hash = ?", (sid_hash,))
+        conn.commit()
+
+
+def delete_all_spotify_sessions(profile_id: str) -> None:
+    """Revoke every session for *profile_id* (used during account-clear / logout-everywhere)."""
+    if _use_cosmos_backend():
+        container = _spotify_sessions_container()
+        items = list(container.query_items(
+            query="SELECT c.id, c.session_id_hash FROM c WHERE c.profile_id = @p",
+            parameters=[{"name": "@p", "value": profile_id}],
+            enable_cross_partition_query=True,
+        ))
+        for it in items:
+            try:
+                container.delete_item(item=it["id"], partition_key=it["session_id_hash"])
+            except cosmos_exceptions.CosmosResourceNotFoundError:
+                pass
+        return
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        conn.execute(
+            "DELETE FROM spotify_sessions WHERE LOWER(profile_id) = LOWER(?)",
+            (profile_id,),
+        )
+        conn.commit()
 
 
 def save_spotify_plays(profile_id: str, plays: list[dict]) -> int:
@@ -1130,6 +1372,7 @@ def clear_spotify_data(profile_id: str) -> int:
 
 
 def delete_spotify_profile(profile_id: str) -> None:
+    delete_all_spotify_sessions(profile_id)
     if _use_cosmos_backend():
         clear_spotify_data(profile_id)
         profiles = _spotify_profiles_container()

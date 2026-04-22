@@ -15,6 +15,20 @@ param resourceToken string
 @secure()
 param lastfmApiKey string = ''
 
+@description('Spotify OAuth client id (https://developer.spotify.com/dashboard).')
+param spotifyClientId string = ''
+
+@description('Spotify OAuth client secret stored as a Container App secret.')
+@secure()
+param spotifyClientSecret string = ''
+
+@description('Spotify OAuth redirect URI. Must match a value registered in the Spotify app dashboard.')
+param spotifyRedirectUri string = ''
+
+@description('Fernet key (32-byte url-safe base64) used to encrypt Spotify refresh tokens at rest.')
+@secure()
+param spotifyTokenEncryptionKey string = ''
+
 var normalizedEnvironmentName = toLower(replace(replace(environmentName, '_', '-'), ' ', '-'))
 var compactEnvironmentName = take(toLower(replace(replace(replace(replace(environmentName, '-', ''), '_', ''), ' ', ''), '.', '')), 41)
 var acrName = 'acr${compactEnvironmentName}${take(resourceToken, 6)}'
@@ -163,6 +177,25 @@ resource cosmosSpotifyPlaysContainer 'Microsoft.DocumentDB/databaseAccounts/sqlD
   }
 }
 
+resource cosmosSpotifySessionsContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-11-15' = {
+  name: 'spotify_sessions'
+  parent: cosmosDatabase
+  properties: {
+    resource: {
+      id: 'spotify_sessions'
+      partitionKey: {
+        paths: [
+          '/session_id_hash'
+        ]
+        kind: 'Hash'
+        version: 2
+      }
+      // 30-day rolling TTL refreshed on each authenticated request.
+      defaultTtl: 2592000
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Container Apps Environment
 // ---------------------------------------------------------------------------
@@ -192,6 +225,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
     cosmosContainer
     cosmosSpotifyProfilesContainer
     cosmosSpotifyPlaysContainer
+    cosmosSpotifySessionsContainer
   ]
   properties: {
     managedEnvironmentId: containerAppsEnvironment.id
@@ -221,6 +255,14 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           name: 'cosmos-connection-string'
           value: cosmosAccount.listConnectionStrings().connectionStrings[0].connectionString
         }
+        {
+          name: 'spotify-client-secret'
+          value: spotifyClientSecret
+        }
+        {
+          name: 'spotify-token-encryption-key'
+          value: spotifyTokenEncryptionKey
+        }
       ]
     }
     template: {
@@ -245,6 +287,22 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
             {
               name: 'COSMOS_CONTAINER_NAME'
               value: cosmosContainerName
+            }
+            {
+              name: 'SPOTIFY_CLIENT_ID'
+              value: spotifyClientId
+            }
+            {
+              name: 'SPOTIFY_CLIENT_SECRET'
+              secretRef: 'spotify-client-secret'
+            }
+            {
+              name: 'SPOTIFY_REDIRECT_URI'
+              value: spotifyRedirectUri
+            }
+            {
+              name: 'SPOTIFY_TOKEN_ENCRYPTION_KEY'
+              secretRef: 'spotify-token-encryption-key'
             }
           ]
           resources: {
