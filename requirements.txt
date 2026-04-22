@@ -3,6 +3,6 @@ requests==2.33.1
 python-dotenv==1.2.2
 gunicorn==25.3.0
 azure-cosmos==4.15.0
-cryptography==46.0.4
+cryptography==46.0.7
 pytest==9.0.3
 ijson==3.5.0
