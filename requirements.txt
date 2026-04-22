@@ -4,3 +4,4 @@ python-dotenv==1.2.2
 gunicorn==25.3.0
 azure-cosmos==4.15.0
 pytest==9.0.3
+ijson==3.5.0

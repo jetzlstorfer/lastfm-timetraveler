@@ -1,7 +1,12 @@
+import hashlib
+import io
+import json as _json
 import os
 import re
+import secrets
 import time
 import logging
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock, Thread
 from math import ceil
@@ -9,13 +14,40 @@ from datetime import datetime, timezone, timedelta
 from urllib.parse import quote, unquote
 from zoneinfo import ZoneInfo
 import requests
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, abort, jsonify, request, send_from_directory
 from dotenv import load_dotenv
 import database as db
 
+try:
+    import ijson  # type: ignore
+except ImportError:  # pragma: no cover - optional dep, falls back to json
+    ijson = None
+
 load_dotenv()
 
+# Cap multipart uploads at 500 MB so multi-year Spotify exports fit comfortably.
+MAX_UPLOAD_BYTES = 500 * 1024 * 1024
+
+# Anti zip-bomb caps for Spotify uploads.
+MAX_TOTAL_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
+MAX_PER_ENTRY_UNCOMPRESSED_BYTES = 500 * 1024 * 1024   # 500 MB
+
+# Spotify import filter: minimum playback duration to count as a play.
+SPOTIFY_MIN_MS_PLAYED = 30_000
+
+# Filename patterns we accept inside ZIPs and as standalone uploads.
+SPOTIFY_FILENAME_RE = re.compile(
+    r"(?:streaming_history_audio_.*\.json|endsong_\d+\.json|streaminghistory.*\.json)$",
+    re.IGNORECASE,
+)
+
+# Spotify token cookie / header names.
+SPOTIFY_TOKEN_COOKIE = "spotify_token"
+SPOTIFY_TOKEN_HEADER = "X-Spotify-Token"
+SPOTIFY_PROFILE_COOKIE = "spotify_profile_id"
+
 app = Flask(__name__, static_folder="static")
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 app.logger.setLevel(logging.INFO)
 
 LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
@@ -826,6 +858,402 @@ def _find_and_store_artist_first_listen(username: str, artist: str) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Spotify Extended Streaming History support
+# ---------------------------------------------------------------------------
+
+
+def _hash_spotify_token(token: str) -> str:
+    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
+
+
+def _read_spotify_token_from_request() -> str:
+    token = request.headers.get(SPOTIFY_TOKEN_HEADER, "").strip()
+    if token:
+        return token
+    return (request.cookies.get(SPOTIFY_TOKEN_COOKIE, "") or "").strip()
+
+
+def _verify_spotify_access(profile_id: str) -> bool:
+    """Return True if the request carries a valid token for *profile_id*.
+
+    Aborts with 403 otherwise.
+    """
+    token = _read_spotify_token_from_request()
+    if not token or not db.verify_spotify_token(profile_id, _hash_spotify_token(token)):
+        abort(403, description="Invalid or missing Spotify profile token.")
+    return True
+
+
+def _spotify_play_from_entry(entry: dict) -> dict | None:
+    """Convert a single Spotify Extended Streaming History entry into our row dict.
+
+    Returns ``None`` if the entry should be filtered (podcasts, short plays,
+    missing fields).
+    """
+    if not isinstance(entry, dict):
+        return None
+    track = entry.get("master_metadata_track_name")
+    artist = entry.get("master_metadata_album_artist_name")
+    if not track or not artist:
+        return None
+    try:
+        ms_played = int(entry.get("ms_played") or 0)
+    except (TypeError, ValueError):
+        ms_played = 0
+    if ms_played < SPOTIFY_MIN_MS_PLAYED:
+        return None
+    ts = entry.get("ts") or ""
+    if not ts:
+        return None
+    try:
+        # Spotify uses ISO 8601 with trailing Z; fromisoformat needs +00:00.
+        ts_norm = ts.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(ts_norm)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        played_at_unix = int(dt.timestamp())
+    except (TypeError, ValueError):
+        return None
+    return {
+        "track": track,
+        "artist": artist,
+        "album": entry.get("master_metadata_album_album_name") or "",
+        "played_at": ts,
+        "played_at_unix": played_at_unix,
+        "ms_played": ms_played,
+    }
+
+
+def _iter_spotify_entries(stream, *, size_hint: int | None = None):
+    """Yield decoded JSON objects from a Spotify history file streamed from *stream*.
+
+    Uses ``ijson`` for large payloads when available; falls back to ``json.load``
+    for smaller files or when ``ijson`` is missing.
+    """
+    use_streaming = ijson is not None and (size_hint is None or size_hint > 25 * 1024 * 1024)
+    if use_streaming:
+        try:
+            for item in ijson.items(stream, "item"):
+                yield item
+            return
+        except Exception:
+            # Streaming parser may have consumed part of the buffer; fall through
+            # to a last-ditch json.load below by re-reading from current position.
+            try:
+                stream.seek(0)
+            except Exception:
+                return
+    try:
+        data = _json.load(stream)
+    except Exception:
+        return
+    if isinstance(data, list):
+        for item in data:
+            yield item
+
+
+def _spotify_import_file(profile_id: str, filename: str, stream, *, size_hint: int | None = None) -> tuple[int, int, int]:
+    """Import a single Spotify JSON file. Returns (imported, filtered, total_entries)."""
+    batch: list[dict] = []
+    imported = 0
+    filtered = 0
+    total = 0
+    for entry in _iter_spotify_entries(stream, size_hint=size_hint):
+        total += 1
+        play = _spotify_play_from_entry(entry)
+        if play is None:
+            filtered += 1
+            continue
+        batch.append(play)
+        if len(batch) >= 1000:
+            imported += db.save_spotify_plays(profile_id, batch)
+            batch = []
+    if batch:
+        imported += db.save_spotify_plays(profile_id, batch)
+    app.logger.info(
+        "spotify import file finished file=%r entries=%s imported=%s filtered=%s",
+        filename,
+        total,
+        imported,
+        filtered,
+    )
+    return imported, filtered, total
+
+
+def _looks_like_spotify_zip(name: str, head_bytes: bytes) -> bool:
+    if name.lower().endswith(".zip"):
+        return True
+    return head_bytes.startswith(b"PK\x03\x04")
+
+
+def _safe_zip_member(member: zipfile.ZipInfo) -> bool:
+    """Reject suspicious zip members (path traversal, absolute paths)."""
+    name = member.filename or ""
+    if not name or name.endswith("/"):
+        return False
+    if name.startswith("/") or "\\" in name:
+        return False
+    if ".." in name.split("/"):
+        return False
+    return True
+
+
+def _spotify_member_is_history(name: str) -> bool:
+    base = name.rsplit("/", 1)[-1]
+    if not base or base.startswith("."):
+        return False
+    if "__MACOSX" in name:
+        return False
+    return bool(SPOTIFY_FILENAME_RE.search(base))
+
+
+def _spotify_import_zip(profile_id: str, filename: str, stream) -> tuple[int, int, int]:
+    """Import a Spotify ZIP archive. Returns (imported, filtered, files_processed)."""
+    imported = 0
+    filtered = 0
+    files_processed = 0
+    total_uncompressed = 0
+    # zipfile needs a seekable stream; load the upload into memory (capped by
+    # MAX_CONTENT_LENGTH so this is bounded).
+    blob = stream.read()
+    bio = io.BytesIO(blob)
+    try:
+        with zipfile.ZipFile(bio) as zf:
+            for member in zf.infolist():
+                if not _safe_zip_member(member):
+                    app.logger.warning("spotify zip rejected unsafe entry name=%r", member.filename)
+                    continue
+                if member.file_size > MAX_PER_ENTRY_UNCOMPRESSED_BYTES:
+                    abort(413, description=f"Zip entry {member.filename!r} exceeds size limit.")
+                total_uncompressed += member.file_size
+                if total_uncompressed > MAX_TOTAL_UNCOMPRESSED_BYTES:
+                    abort(413, description="Zip uncompressed size exceeds limit.")
+                if not _spotify_member_is_history(member.filename):
+                    continue
+                with zf.open(member) as inner:
+                    fi, ff, _ = _spotify_import_file(
+                        profile_id,
+                        f"{filename}::{member.filename}",
+                        inner,
+                        size_hint=member.file_size,
+                    )
+                imported += fi
+                filtered += ff
+                files_processed += 1
+    except zipfile.BadZipFile:
+        abort(400, description=f"Uploaded file {filename!r} is not a valid ZIP archive.")
+    return imported, filtered, files_processed
+
+
+@app.errorhandler(413)
+def _request_too_large(exc):  # noqa: ARG001
+    return jsonify({
+        "ok": False,
+        "error": "Upload exceeds the configured size limit.",
+        "max_bytes": MAX_UPLOAD_BYTES,
+    }), 413
+
+
+@app.route("/api/spotify/upload", methods=["POST"])
+def spotify_upload():
+    """Import Spotify Extended Streaming History from JSON or ZIP files.
+
+    Multipart form fields:
+      - profile_id: user-chosen display name
+      - files: one or more uploaded files (.json or .zip)
+
+    On first upload for a profile a fresh token is generated and returned in
+    the response body and as a SameSite=Lax cookie. Subsequent uploads to the
+    same profile require a valid token (cookie or X-Spotify-Token header).
+    """
+    profile_id = (request.form.get("profile_id") or "").strip()
+    if not profile_id:
+        return jsonify({"ok": False, "error": "profile_id is required"}), 400
+    if len(profile_id) > 80:
+        return jsonify({"ok": False, "error": "profile_id is too long (max 80 chars)"}), 400
+
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify({"ok": False, "error": "At least one file is required"}), 400
+
+    profile_exists = db.spotify_profile_exists(profile_id)
+    # Allow re-claiming an empty profile (e.g. user disconnected/cleared and lost their token)
+    # by deleting the dangling profile record. If the profile still has data, the original
+    # token is required.
+    if profile_exists and not db.has_spotify_data(profile_id):
+        token = _read_spotify_token_from_request()
+        if not token or not db.verify_spotify_token(profile_id, _hash_spotify_token(token)):
+            db.delete_spotify_profile(profile_id)
+            profile_exists = False
+
+    is_new_profile = not profile_exists
+    issued_token = ""
+    if is_new_profile:
+        issued_token = secrets.token_urlsafe(32)
+        try:
+            db.create_spotify_profile(profile_id, _hash_spotify_token(issued_token))
+        except Exception as exc:
+            app.logger.exception("failed to create spotify profile profile_id=%r", profile_id)
+            return jsonify({"ok": False, "error": f"Could not create profile: {exc}"}), 500
+    else:
+        _verify_spotify_access(profile_id)
+
+    total_imported = 0
+    total_filtered = 0
+    files_processed = 0
+    try:
+        for f in files:
+            if not f or not f.filename:
+                continue
+            head = f.stream.read(4)
+            try:
+                f.stream.seek(0)
+            except Exception:
+                # Wrap in BytesIO if the stream is not seekable (rare).
+                rest = f.stream.read()
+                f.stream = io.BytesIO(head + rest)  # type: ignore[attr-defined]
+            if _looks_like_spotify_zip(f.filename, head):
+                fi, ff, fc = _spotify_import_zip(profile_id, f.filename, f.stream)
+                total_imported += fi
+                total_filtered += ff
+                files_processed += fc
+            elif f.filename.lower().endswith(".json"):
+                fi, ff, _entries = _spotify_import_file(
+                    profile_id,
+                    f.filename,
+                    f.stream,
+                    size_hint=getattr(f, "content_length", None),
+                )
+                total_imported += fi
+                total_filtered += ff
+                files_processed += 1
+            else:
+                app.logger.info("spotify upload skipped unsupported file=%r", f.filename)
+    except Exception as exc:
+        # If we created the profile in this call but failed mid-import, leave it
+        # so the user can retry with the issued token. Surface the error.
+        app.logger.exception("spotify upload failed profile_id=%r", profile_id)
+        return jsonify({"ok": False, "error": f"Import failed: {exc}"}), 500
+
+    stats = db.get_spotify_stats(profile_id)
+    response_body = {
+        "ok": True,
+        "imported": total_imported,
+        "filtered": total_filtered,
+        "files_processed": files_processed,
+        "stats": stats,
+    }
+    if issued_token:
+        response_body["token"] = issued_token
+    resp = jsonify(response_body)
+    if issued_token:
+        # Persist the token + profile id in cookies so a returning visitor can
+        # auto-reconnect without re-uploading.
+        max_age = 365 * 24 * 60 * 60
+        resp.set_cookie(
+            SPOTIFY_TOKEN_COOKIE,
+            issued_token,
+            max_age=max_age,
+            samesite="Lax",
+            httponly=False,
+            path="/",
+        )
+        resp.set_cookie(
+            SPOTIFY_PROFILE_COOKIE,
+            profile_id,
+            max_age=max_age,
+            samesite="Lax",
+            httponly=False,
+            path="/",
+        )
+    return resp
+
+
+@app.route("/api/spotify/status")
+def spotify_status():
+    profile_id = (request.args.get("profile_id") or "").strip()
+    if not profile_id:
+        return jsonify({"ok": False, "error": "profile_id is required"}), 400
+    if not db.spotify_profile_exists(profile_id):
+        return jsonify({"ok": False, "error": "Profile not found"}), 404
+    _verify_spotify_access(profile_id)
+    return jsonify({
+        "ok": True,
+        "profile_id": profile_id,
+        "has_data": db.has_spotify_data(profile_id),
+        "stats": db.get_spotify_stats(profile_id),
+    })
+
+
+@app.route("/api/spotify/data", methods=["DELETE"])
+def spotify_clear_data():
+    profile_id = (request.args.get("profile_id") or "").strip()
+    if not profile_id:
+        return jsonify({"ok": False, "error": "profile_id is required"}), 400
+    if not db.spotify_profile_exists(profile_id):
+        return jsonify({"ok": False, "error": "Profile not found"}), 404
+    _verify_spotify_access(profile_id)
+    delete_profile = (request.args.get("delete_profile") or "").lower() in ("1", "true", "yes")
+    deleted = db.clear_spotify_data(profile_id)
+    if delete_profile:
+        db.delete_spotify_profile(profile_id)
+    return jsonify({"ok": True, "deleted": deleted, "profile_deleted": delete_profile})
+
+
+@app.route("/api/spotify/search")
+def spotify_search():
+    profile_id = (request.args.get("profile_id") or "").strip()
+    query = (request.args.get("q") or "").strip()
+    if not profile_id:
+        return jsonify({"ok": False, "error": "profile_id is required"}), 400
+    if not db.spotify_profile_exists(profile_id):
+        return jsonify({"ok": False, "error": "Profile not found"}), 404
+    _verify_spotify_access(profile_id)
+    if len(query) < 2:
+        return jsonify([])
+    rows = db.search_spotify_tracks(profile_id, query, limit=20)
+    results = [
+        {
+            "name": r["track"],
+            "artist": r["artist"],
+            "album": r.get("album", "") or "",
+            "source": "spotify",
+        }
+        for r in rows
+    ]
+    return jsonify(results)
+
+
+def _spotify_first_listen_payload(profile_id: str, track: str, artist: str) -> dict | None:
+    """Return a first-listen result dict from Spotify history, or None."""
+    row = db.get_spotify_first_listen(profile_id, track, artist)
+    if not row:
+        return None
+    play_count = db.get_spotify_play_count(profile_id, track, artist)
+    ts = int(row.get("played_at_unix") or 0)
+    iso = row.get("played_at") or ""
+    if ts:
+        date_text = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%d %b %Y, %H:%M")
+    else:
+        date_text = iso
+    return {
+        "found": True,
+        "track": row.get("track", track),
+        "artist": row.get("artist", artist),
+        "album": row.get("album", "") or "",
+        "date": date_text,
+        "timestamp": str(ts) if ts else "",
+        "total_scrobbles": play_count,
+        "image": "",
+        "date_unavailable": not bool(date_text),
+        "date_unavailable_reason": "",
+        "cached": False,
+        "source": "spotify",
+    }
+
+
+
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
@@ -1409,22 +1837,82 @@ def first_listen():
     track = request.args.get("track", "").strip()
     artist = request.args.get("artist", "").strip()
     username = request.args.get("username", "").strip()
+    profile_id = request.args.get("profile_id", "").strip()
     hint_timestamp = request.args.get("hint_timestamp", "").strip() or None
 
-    if not track or not artist or not username:
+    if not track or not artist:
         finish_lookup_progress(
             lookup_id,
             stage="request-invalid",
             status="Lookup failed",
-            detail="The lookup request is missing the required track, artist, or username.",
+            detail="The lookup request is missing the required track or artist.",
         )
         return jsonify({
-            "error": "track, artist, and username are required",
+            "error": "track and artist are required",
+            "elapsed_ms": elapsed_ms(),
+        }), 400
+
+    if not username and not profile_id:
+        finish_lookup_progress(
+            lookup_id,
+            stage="request-invalid",
+            status="Lookup failed",
+            detail="Either a Last.fm username or a Spotify profile_id is required.",
+        )
+        return jsonify({
+            "error": "username or profile_id is required",
             "elapsed_ms": elapsed_ms(),
         }), 400
 
     if not lookup_id:
         lookup_id = f"server-{int(time.time() * 1000)}"
+
+    # Spotify-first resolution: if a profile_id + valid token is supplied and
+    # the play exists in the imported history, return it immediately.
+    if profile_id and db.spotify_profile_exists(profile_id):
+        token = _read_spotify_token_from_request()
+        if token and db.verify_spotify_token(profile_id, _hash_spotify_token(token)):
+            spotify_payload = _spotify_first_listen_payload(profile_id, track, artist)
+            if spotify_payload:
+                spotify_payload["elapsed_ms"] = elapsed_ms()
+                finish_lookup_progress(
+                    lookup_id,
+                    profile_id=profile_id,
+                    artist=spotify_payload["artist"],
+                    track=spotify_payload["track"],
+                    stage="spotify-hit",
+                    status="Found in your Spotify history",
+                    detail="Returned the earliest play from your imported Spotify Extended Streaming History.",
+                    pages_checked=1,
+                    pages_total=1,
+                    result=spotify_payload,
+                )
+                return jsonify(spotify_payload)
+
+    # If Last.fm is not connected we can't go further — return not found.
+    if not username:
+        not_found = {
+            "found": False,
+            "track": track,
+            "artist": artist,
+            "message": "No matching play found in your imported Spotify history.",
+            "cached": False,
+            "source": "spotify",
+            "elapsed_ms": elapsed_ms(),
+        }
+        finish_lookup_progress(
+            lookup_id,
+            profile_id=profile_id,
+            artist=artist,
+            track=track,
+            stage="lookup-finished",
+            status="No matching play",
+            detail="The track was not found in the imported Spotify history.",
+            pages_checked=1,
+            pages_total=1,
+            result=not_found,
+        )
+        return jsonify(not_found)
 
     # Return cached result immediately if available (first-listen date never changes)
     # Skip cache entries that have no date — those are transient failures worth retrying.
@@ -1621,12 +2109,49 @@ def artist_first_listen():
     If the result is already cached in the database it is returned immediately.
     Otherwise a live lookup against the Last.fm public library page is performed
     and the result is stored for future calls.
+
+    If a Spotify ``profile_id`` (with valid token) is supplied and the artist
+    appears in the imported Spotify history, the Spotify result is preferred.
     """
     username = request.args.get("username", "").strip()
     artist = request.args.get("artist", "").strip()
+    profile_id = request.args.get("profile_id", "").strip()
 
-    if not username or not artist:
-        return jsonify({"error": "username and artist are required"}), 400
+    if not artist:
+        return jsonify({"error": "artist is required"}), 400
+    if not username and not profile_id:
+        return jsonify({"error": "username or profile_id is required"}), 400
+
+    # Spotify-first
+    if profile_id and db.spotify_profile_exists(profile_id):
+        token = _read_spotify_token_from_request()
+        if token and db.verify_spotify_token(profile_id, _hash_spotify_token(token)):
+            row = db.get_spotify_artist_first_listen(profile_id, artist)
+            if row:
+                ts = int(row.get("played_at_unix") or 0)
+                date_text = (
+                    datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%d %b %Y, %H:%M")
+                    if ts else (row.get("played_at") or "")
+                )
+                return jsonify({
+                    "artist": row.get("artist", artist),
+                    "username": username,
+                    "profile_id": profile_id,
+                    "first_listen_date": date_text,
+                    "first_listen_timestamp": str(ts) if ts else "",
+                    "first_listen_track": row.get("track", ""),
+                    "source": "spotify",
+                })
+
+    if not username:
+        return jsonify({
+            "artist": artist,
+            "profile_id": profile_id,
+            "first_listen_date": "",
+            "first_listen_timestamp": "",
+            "first_listen_track": "",
+            "source": "spotify",
+        })
 
     result = _find_and_store_artist_first_listen(username, artist)
     return jsonify(
@@ -1636,6 +2161,7 @@ def artist_first_listen():
             "first_listen_date": result["first_listen_date"],
             "first_listen_timestamp": result["first_listen_timestamp"],
             "first_listen_track": result["first_listen_track"],
+            "source": "lastfm",
         }
     )
 

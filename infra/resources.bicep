@@ -121,6 +121,40 @@ resource cosmosContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/con
   }
 }
 
+resource cosmosSpotifyProfilesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-11-15' = {
+  name: 'spotify_profiles'
+  parent: cosmosDatabase
+  properties: {
+    resource: {
+      id: 'spotify_profiles'
+      partitionKey: {
+        paths: [
+          '/profile_id_normalized'
+        ]
+        kind: 'Hash'
+        version: 2
+      }
+    }
+  }
+}
+
+resource cosmosSpotifyPlaysContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-11-15' = {
+  name: 'spotify_plays'
+  parent: cosmosDatabase
+  properties: {
+    resource: {
+      id: 'spotify_plays'
+      partitionKey: {
+        paths: [
+          '/profile_id_normalized'
+        ]
+        kind: 'Hash'
+        version: 2
+      }
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Container Apps Environment
 // ---------------------------------------------------------------------------
@@ -148,6 +182,8 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
   tags: union(tags, { 'azd-service-name': 'web' })
   dependsOn: [
     cosmosContainer
+    cosmosSpotifyProfilesContainer
+    cosmosSpotifyPlaysContainer
   ]
   properties: {
     managedEnvironmentId: containerAppsEnvironment.id
