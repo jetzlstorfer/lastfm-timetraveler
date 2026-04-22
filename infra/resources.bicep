@@ -200,14 +200,6 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
         external: true
         targetPort: 5000
         transport: 'auto'
-        // Allow uploads up to ~10 minutes — Spotify Extended Streaming
-        // History exports can be large (hundreds of MB) and the body upload
-        // alone can exceed the default 4-minute ingress timeout on slower
-        // connections. The actual import runs in a background thread so the
-        // HTTP response itself returns within seconds (HTTP 202 + job_id),
-        // but the request body upload phase still happens inside this window.
-        // Max value supported by Container Apps is 11 minutes.
-        idleTimeoutInMinutes: 10
       }
       registries: [
         {
