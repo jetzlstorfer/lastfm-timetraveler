@@ -13,6 +13,20 @@ param location string
 @secure()
 param lastfmApiKey string = ''
 
+@description('Spotify OAuth client id.')
+param spotifyClientId string = ''
+
+@description('Spotify OAuth client secret.')
+@secure()
+param spotifyClientSecret string = ''
+
+@description('Spotify OAuth redirect URI (must match the Spotify app dashboard).')
+param spotifyRedirectUri string = ''
+
+@description('Fernet key (url-safe base64) used to encrypt Spotify refresh tokens.')
+@secure()
+param spotifyTokenEncryptionKey string = ''
+
 var tags = { 'azd-env-name': environmentName }
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
 
@@ -31,6 +45,10 @@ module resources 'resources.bicep' = {
     tags: tags
     resourceToken: resourceToken
     lastfmApiKey: lastfmApiKey
+    spotifyClientId: spotifyClientId
+    spotifyClientSecret: spotifyClientSecret
+    spotifyRedirectUri: spotifyRedirectUri
+    spotifyTokenEncryptionKey: spotifyTokenEncryptionKey
   }
 }
 

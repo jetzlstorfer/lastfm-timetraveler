@@ -10,6 +10,18 @@
     },
     "lastfmApiKey": {
       "value": "${LASTFM_API_KEY}"
+    },
+    "spotifyClientId": {
+      "value": "${SPOTIFY_CLIENT_ID}"
+    },
+    "spotifyClientSecret": {
+      "value": "${SPOTIFY_CLIENT_SECRET}"
+    },
+    "spotifyRedirectUri": {
+      "value": "${SPOTIFY_REDIRECT_URI}"
+    },
+    "spotifyTokenEncryptionKey": {
+      "value": "${SPOTIFY_TOKEN_ENCRYPTION_KEY}"
     }
   }
 }

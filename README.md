@@ -8,9 +8,10 @@ Connect either source (or both), type a song title, pick from the autocomplete s
 
 ## What's new
 
+- 🔐 **Log in with Spotify** — sign in via the Spotify OAuth flow (Authorization Code + PKCE). Your Spotify user id is your identity, so the same account on phone and desktop sees the same data. No passwords, no share links.
 - 🎧 **Spotify import** — upload your Spotify Extended Streaming History (`.json` files or the raw `.zip`) and the app uses your private play data as the **primary** source for first-listen lookups (instant, no API rate limits, complete history back to your first play).
-- 🔐 **Token-based auth** — Spotify uploads are protected by a per-profile secret token stored in a cookie. No passwords, no logins. The token's SHA-256 hash is what's stored on the server.
-- 🪞 **Dual-source search** — connect Spotify only, Last.fm only, or both. When both are connected, autocomplete merges results and Spotify takes priority (because it's faster and more complete).
+- 🔄 **One-click sync** — once logged in, click **Sync** to pull your last 50 plays from Spotify's `recently-played` API and append them to your imported history.
+- 🪞 **Dual-source search** — log into Spotify, connect Last.fm, or both. When both are connected, autocomplete merges results and Spotify takes priority (because it's faster and more complete).
 
 ## Architecture
 
@@ -86,13 +87,38 @@ or directly:
 pytest
 ```
 
-## Spotify import
+## Spotify
 
-### How to get your data
+### Setting up Spotify OAuth
+
+The app uses Spotify's [Authorization Code + PKCE](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow) flow with a server-side client secret. To enable it:
+
+1. Create a Spotify app at https://developer.spotify.com/dashboard.
+2. Copy the **Client ID** and **Client Secret** into your `.env` (`SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`).
+3. Add a **Redirect URI** in the Spotify dashboard that exactly matches `SPOTIFY_REDIRECT_URI`. For local dev: `http://127.0.0.1:5000/api/spotify/callback`. For production: `https://<your-host>/api/spotify/callback`.
+4. Generate a Fernet key for encrypting refresh tokens at rest:
+   ```bash
+   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+   ```
+   Store the output as `SPOTIFY_TOKEN_ENCRYPTION_KEY`. **Keep this stable** — rotating it invalidates every stored refresh token (users will have to log in again).
+
+The OAuth scopes requested are `user-read-email user-read-recently-played`. If any of the four env vars above are missing the **Log in with Spotify** button is hidden and the auth endpoints return `503`.
+
+### Logging in & sync
+
+Click **Log in with Spotify** to start the OAuth flow. After you grant access you're redirected back and a `spotify_session` cookie (HttpOnly, `SameSite=Lax`, 30-day TTL) is set. The session id's SHA-256 hash is what's stored server-side; the raw cookie value never leaves your browser.
+
+Once logged in:
+- **Sync** calls Spotify's `/v1/me/player/recently-played` to fetch your last 50 plays and merges them into your imported history (deduplicated).
+- **Logout** removes the server-side session and clears the cookie.
+
+The sync API only returns the most recent 50 plays — for years of history use the GDPR export below.
+
+### How to import your full history (GDPR export)
 
 1. Log into https://www.spotify.com/account/privacy and request your **Extended Streaming History** (not the basic one — the extended export contains every play back to account creation, with full track metadata and play timestamps).
 2. Spotify emails you a download link within ~5 days. The download is a `.zip` containing one or more `Streaming_History_Audio_*.json` files.
-3. In the app, enter a display name (anything memorable — it's only used to label your data), then either drop the whole `.zip` in or select the individual `.json` files. Up to 500 MB per upload.
+3. In the app, log in with Spotify, then drop the whole `.zip` into the upload box or select the individual `.json` files. Up to 500 MB per upload.
 
 ### What gets imported
 
@@ -135,14 +161,11 @@ flowchart TD
   class done_lastfm,done_cache api
 ```
 
-### Disconnecting
+### Clearing data & logging out
 
-The "Clear & disconnect" button calls `DELETE /api/spotify/data?delete_profile=true`, which:
-
-- removes every play document from `spotify_plays` (all data for your `profile_id`),
-- removes your profile record from `spotify_profiles` (token hash + metadata).
-
-Both Cosmos containers are fully cleaned. There is no recovery once disconnected — your token cookie is also discarded.
+- **Clear data** (`DELETE /api/spotify/data`) removes every play document from `spotify_plays` for your profile but keeps your session and profile so you can re-upload.
+- **Logout** (`POST /api/spotify/logout`) deletes the server-side session record and clears the cookie. Your imported plays and profile remain — log in again with the same Spotify account to access them.
+- To fully purge a profile, log out and revoke the app from your Spotify account settings; the profile + plays expire automatically after the 90-day TTL on the Cosmos backend.
 
 ## Database
 
@@ -158,8 +181,9 @@ flowchart LR
 | Cosmos container | Partition key | Holds |
 |---|---|---|
 | `searches` | `/username_normalized` | Last.fm first-listen cache + per-artist first-listen cache |
-| `spotify_profiles` | `/profile_id_normalized` | One doc per Spotify user — display name + SHA-256 token hash |
+| `spotify_profiles` | `/profile_id_normalized` | One doc per Spotify user — display name + Fernet-encrypted refresh token + last-sync timestamp |
 | `spotify_plays` | `/profile_id_normalized` | One doc per Spotify play (deterministic SHA-1 ID for natural dedup) |
+| `spotify_sessions` | `/session_id_hash` | Server-side session records (SHA-256 of the session cookie value), 30-day TTL |
 
 Per-user partitioning means every Spotify query is a single-partition lookup — fast and RU-cheap.
 
@@ -230,6 +254,9 @@ You will be prompted for:
 - `AZURE_ENV_NAME` — a short name for this environment (e.g. `lastfm-prod`)
 - `AZURE_LOCATION` — Azure region (e.g. `eastus`)
 - `LASTFM_API_KEY` — your Last.fm API key (stored as a secret)
+- `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` — your Spotify app credentials (stored as secrets)
+- `SPOTIFY_REDIRECT_URI` — must be `https://<your-host>/api/spotify/callback` and registered in the Spotify dashboard
+- `SPOTIFY_TOKEN_ENCRYPTION_KEY` — a Fernet key (see [Spotify](#spotify))
 
 The Cosmos connection string is wired into the Container App as a secret reference — you don't need to set it manually.
 
@@ -255,6 +282,10 @@ The `.github/workflows/azure-aca-deploy.yml` workflow runs `azd provision` and `
 | `AZURE_ENV_NAME` | Variable | azd environment name |
 | `AZURE_LOCATION` | Variable | Azure region (e.g. `eastus`) |
 | `LASTFM_API_KEY` | **Secret** | Last.fm API key |
+| `SPOTIFY_CLIENT_ID` | Variable | Spotify app client id |
+| `SPOTIFY_CLIENT_SECRET` | **Secret** | Spotify app client secret |
+| `SPOTIFY_REDIRECT_URI` | Variable | OAuth callback URL (`https://<host>/api/spotify/callback`) |
+| `SPOTIFY_TOKEN_ENCRYPTION_KEY` | **Secret** | Fernet key for encrypting refresh tokens at rest |
 
 To set up federated credentials (OIDC) for the service principal, follow the [azd GitHub Actions guide](https://learn.microsoft.com/azure/developer/azure-developer-cli/configure-devops-pipeline).
 
@@ -287,9 +318,13 @@ To set up federated credentials (OIDC) for the service principal, follow the [az
 | `GET /api/artist-first-listen?artist=&username=&profile_id=` | First time a user heard any track by the given artist |
 | `GET /api/history?username=` | All cached first-listen results for the given Last.fm username |
 | `GET /api/listening-history?username=&track=&artist=` | Per-week play counts for a track (Last.fm only) |
-| `POST /api/spotify/upload` | Multipart upload of `.json` / `.zip` Spotify history files. First upload issues a token. |
-| `GET /api/spotify/status?profile_id=` | Verify token and report import stats |
-| `DELETE /api/spotify/data?profile_id=&delete_profile=true` | Clear imported plays; with `delete_profile=true` also deletes the profile + token |
-| `GET /api/spotify/search?profile_id=&q=` | Autocomplete over the user's imported Spotify tracks |
+| `GET /api/spotify/login` | Start the OAuth flow (302 redirect to Spotify) |
+| `GET /api/spotify/callback` | OAuth callback — exchanges the auth code for tokens and creates a session |
+| `POST /api/spotify/logout` | Delete the server-side session and clear the cookie |
+| `GET /api/spotify/status` | Reports `logged_in`, profile id, display name, and import stats |
+| `POST /api/spotify/upload` | Multipart upload of `.json` / `.zip` Spotify history files (session required) |
+| `POST /api/spotify/sync` | Pull the last 50 plays from Spotify's `recently-played` and append them |
+| `DELETE /api/spotify/data` | Clear imported plays for the logged-in user |
+| `GET /api/spotify/search?q=` | Autocomplete over the user's imported Spotify tracks |
 
-All `/api/spotify/*` endpoints (except the initial upload that creates a profile) require the `spotify_token` cookie or `X-Spotify-Token` header.
+All `/api/spotify/*` endpoints (except `login`, `callback`, and `status`) require a valid `spotify_session` cookie.

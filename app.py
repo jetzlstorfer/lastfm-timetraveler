@@ -15,7 +15,7 @@ from datetime import datetime, timezone, timedelta
 from urllib.parse import quote, unquote
 from zoneinfo import ZoneInfo
 import requests
-from flask import Flask, abort, jsonify, request, send_from_directory
+from flask import Flask, abort, jsonify, redirect as _flask_redirect, request, send_from_directory
 from dotenv import load_dotenv
 import database as db
 
@@ -42,10 +42,21 @@ SPOTIFY_FILENAME_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Spotify token cookie / header names.
-SPOTIFY_TOKEN_COOKIE = "spotify_token"
-SPOTIFY_TOKEN_HEADER = "X-Spotify-Token"
-SPOTIFY_PROFILE_COOKIE = "spotify_profile_id"
+# ---- Spotify OAuth ---------------------------------------------------------
+# Identity is the Spotify user id, returned by /me. After the OAuth handshake
+# we issue an opaque random session id and store its SHA-256 hash server-side
+# (see database.create_spotify_session). The browser keeps only the cookie.
+SPOTIFY_SESSION_COOKIE = "spotify_session"
+SPOTIFY_SESSION_COOKIE_MAX_AGE = 30 * 24 * 60 * 60  # 30 days, matches DB TTL
+SPOTIFY_OAUTH_AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
+SPOTIFY_OAUTH_TOKEN_URL = "https://accounts.spotify.com/api/token"
+SPOTIFY_API_BASE = "https://api.spotify.com/v1"
+SPOTIFY_OAUTH_SCOPES = "user-read-email user-read-recently-played"
+SPOTIFY_OAUTH_STATE_TTL_SECONDS = 10 * 60
+SPOTIFY_CLIENT_ID = (os.getenv("SPOTIFY_CLIENT_ID") or "").strip()
+SPOTIFY_CLIENT_SECRET = (os.getenv("SPOTIFY_CLIENT_SECRET") or "").strip()
+SPOTIFY_REDIRECT_URI = (os.getenv("SPOTIFY_REDIRECT_URI") or "").strip()
+SPOTIFY_TOKEN_ENCRYPTION_KEY = (os.getenv("SPOTIFY_TOKEN_ENCRYPTION_KEY") or "").strip()
 
 app = Flask(__name__, static_folder="static")
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
@@ -931,27 +942,179 @@ def _find_and_store_artist_first_listen(username: str, artist: str) -> dict:
 # Spotify Extended Streaming History support
 # ---------------------------------------------------------------------------
 
+# Pending OAuth state -> code_verifier (PKCE). Lives in memory only; if a
+# worker is killed mid-flow the user just retries login.
+SPOTIFY_OAUTH_PENDING: dict[str, dict] = {}
+SPOTIFY_OAUTH_PENDING_LOCK = Lock()
 
-def _hash_spotify_token(token: str) -> str:
-    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
+# Per-user access-token cache. Single-worker gunicorn (--workers 1) means a
+# plain dict is safe; if scaled out, drop this and refresh per request.
+SPOTIFY_ACCESS_TOKENS: dict[str, dict] = {}
+SPOTIFY_ACCESS_TOKENS_LOCK = Lock()
 
 
-def _read_spotify_token_from_request() -> str:
-    token = request.headers.get(SPOTIFY_TOKEN_HEADER, "").strip()
-    if token:
-        return token
-    return (request.cookies.get(SPOTIFY_TOKEN_COOKIE, "") or "").strip()
+def _spotify_oauth_configured() -> bool:
+    return bool(
+        SPOTIFY_CLIENT_ID
+        and SPOTIFY_CLIENT_SECRET
+        and SPOTIFY_REDIRECT_URI
+        and SPOTIFY_TOKEN_ENCRYPTION_KEY
+    )
 
 
-def _verify_spotify_access(profile_id: str) -> bool:
-    """Return True if the request carries a valid token for *profile_id*.
+def _fernet():
+    """Lazily build a Fernet instance from the configured key."""
+    from cryptography.fernet import Fernet  # imported lazily to keep import-time light
+    return Fernet(SPOTIFY_TOKEN_ENCRYPTION_KEY.encode("utf-8"))
 
-    Aborts with 403 otherwise.
+
+def _encrypt_refresh_token(token: str) -> str:
+    if not token:
+        return ""
+    return _fernet().encrypt(token.encode("utf-8")).decode("ascii")
+
+
+def _decrypt_refresh_token(token_encrypted: str) -> str:
+    if not token_encrypted:
+        return ""
+    return _fernet().decrypt(token_encrypted.encode("ascii")).decode("utf-8")
+
+
+def _spotify_pkce_pair() -> tuple[str, str]:
+    """Return (code_verifier, code_challenge) per RFC 7636."""
+    import base64
+    verifier = secrets.token_urlsafe(64)[:128]
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
+
+
+def _cleanup_oauth_states(now: float | None = None) -> None:
+    now = now or time.time()
+    expired = [
+        s for s, payload in SPOTIFY_OAUTH_PENDING.items()
+        if now - payload.get("created_at", 0) > SPOTIFY_OAUTH_STATE_TTL_SECONDS
+    ]
+    for s in expired:
+        SPOTIFY_OAUTH_PENDING.pop(s, None)
+
+
+def _read_spotify_session_id() -> str:
+    return (request.cookies.get(SPOTIFY_SESSION_COOKIE) or "").strip()
+
+
+def _current_spotify_user() -> str | None:
+    """Return the logged-in Spotify user id, or None."""
+    sid = _read_spotify_session_id()
+    if not sid:
+        return None
+    return db.verify_spotify_session(sid)
+
+
+def _require_spotify_session() -> str:
+    """Return the logged-in Spotify user id or abort with 401."""
+    profile_id = _current_spotify_user()
+    if not profile_id:
+        abort(401, description="Spotify login required.")
+    return profile_id
+
+
+def _spotify_request_token(payload: dict) -> dict:
+    """POST to Spotify's token endpoint and return the JSON response.
+
+    Uses HTTP Basic for client_id:client_secret per the Authorization Code flow.
     """
-    token = _read_spotify_token_from_request()
-    if not token or not db.verify_spotify_token(profile_id, _hash_spotify_token(token)):
-        abort(403, description="Invalid or missing Spotify profile token.")
-    return True
+    import base64
+    auth = base64.b64encode(
+        f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode("utf-8")
+    ).decode("ascii")
+    resp = requests.post(
+        SPOTIFY_OAUTH_TOKEN_URL,
+        data=payload,
+        headers={
+            "Authorization": f"Basic {auth}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        app.logger.warning("spotify token endpoint returned %s: %s", resp.status_code, resp.text[:300])
+        try:
+            body = resp.json()
+        except Exception:
+            body = {"error": "token_exchange_failed", "error_description": resp.text[:200]}
+        raise requests.HTTPError(body, response=resp)
+    return resp.json()
+
+
+def _get_valid_access_token(profile_id: str) -> str:
+    """Return a fresh access token for *profile_id*, refreshing if needed."""
+    now = time.time()
+    with SPOTIFY_ACCESS_TOKENS_LOCK:
+        cached = SPOTIFY_ACCESS_TOKENS.get(profile_id)
+        if cached and cached.get("expires_at", 0) - 60 > now:
+            return cached["access_token"]
+    profile = db.get_spotify_profile(profile_id)
+    if not profile:
+        abort(401, description="Spotify profile not found.")
+    enc = profile.get("refresh_token_encrypted") or ""
+    if not enc:
+        abort(401, description="No refresh token on file. Please re-login with Spotify.")
+    refresh_token = _decrypt_refresh_token(enc)
+    token_resp = _spotify_request_token({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+    })
+    access_token = token_resp.get("access_token") or ""
+    expires_in = int(token_resp.get("expires_in") or 3600)
+    if not access_token:
+        abort(502, description="Spotify did not return an access token.")
+    # Spotify may rotate the refresh token; persist if so.
+    new_refresh = token_resp.get("refresh_token")
+    if new_refresh and new_refresh != refresh_token:
+        db.update_spotify_refresh_token(profile_id, _encrypt_refresh_token(new_refresh))
+    with SPOTIFY_ACCESS_TOKENS_LOCK:
+        SPOTIFY_ACCESS_TOKENS[profile_id] = {
+            "access_token": access_token,
+            "expires_at": now + expires_in,
+        }
+    return access_token
+
+
+def _spotify_play_from_recently_played_item(item: dict) -> dict | None:
+    """Convert one /me/player/recently-played item to our play-row dict."""
+    if not isinstance(item, dict):
+        return None
+    track = item.get("track") or {}
+    name = track.get("name")
+    artists = track.get("artists") or []
+    artist = (artists[0] or {}).get("name") if artists else None
+    if not name or not artist:
+        return None
+    album = ((track.get("album") or {}).get("name")) or ""
+    played_at = item.get("played_at") or ""
+    if not played_at:
+        return None
+    try:
+        ts_norm = played_at.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(ts_norm)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        played_at_unix = int(dt.timestamp())
+    except (TypeError, ValueError):
+        return None
+    duration_ms = int(track.get("duration_ms") or 0)
+    return {
+        "track": name,
+        "artist": artist,
+        "album": album,
+        "played_at": played_at,
+        "played_at_unix": played_at_unix,
+        # The recent-plays endpoint doesn't report ms_played; assume the full
+        # track. This keeps these rows above SPOTIFY_MIN_MS_PLAYED for the
+        # filter that runs on uploads (sync-imported rows don't filter).
+        "ms_played": max(duration_ms, SPOTIFY_MIN_MS_PLAYED),
+    }
 
 
 def _spotify_play_from_entry(entry: dict) -> dict | None:
@@ -1159,6 +1322,14 @@ def _forbidden_json(exc):
     return exc
 
 
+@app.errorhandler(401)
+def _unauthorized_json(exc):
+    if request.path.startswith("/api/"):
+        description = getattr(exc, "description", None) or "Authentication required."
+        return jsonify({"ok": False, "error": description}), 401
+    return exc
+
+
 @app.errorhandler(500)
 def _server_error_json(exc):
     """Return a JSON 500 for /api/ routes so the UI can surface a useful message."""
@@ -1198,114 +1369,160 @@ def _unhandled_exception_json(exc):
     }), 500
 
 
+def _redirect(location: str):
+    return _flask_redirect(location, code=302)
+
+
+@app.route("/api/spotify/login")
+def spotify_login():
+    """Kick off the Authorization Code + PKCE flow."""
+    if not _spotify_oauth_configured():
+        return jsonify({
+            "ok": False,
+            "error": "Spotify login is not configured on this server.",
+        }), 503
+    state = secrets.token_urlsafe(32)
+    verifier, challenge = _spotify_pkce_pair()
+    with SPOTIFY_OAUTH_PENDING_LOCK:
+        _cleanup_oauth_states()
+        SPOTIFY_OAUTH_PENDING[state] = {
+            "code_verifier": verifier,
+            "created_at": time.time(),
+        }
+    from urllib.parse import urlencode
+    params = urlencode({
+        "client_id": SPOTIFY_CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": SPOTIFY_REDIRECT_URI,
+        "scope": SPOTIFY_OAUTH_SCOPES,
+        "state": state,
+        "code_challenge_method": "S256",
+        "code_challenge": challenge,
+        # Force the consent screen on every login so the user can pick
+        # a different account if they want to.
+        "show_dialog": "true",
+    })
+    return _redirect(f"{SPOTIFY_OAUTH_AUTHORIZE_URL}?{params}")
+
+
+@app.route("/api/spotify/callback")
+def spotify_callback():
+    """Exchange the auth code for tokens, fetch /me, create a session."""
+    if not _spotify_oauth_configured():
+        return jsonify({"ok": False, "error": "Spotify login is not configured."}), 503
+    error = (request.args.get("error") or "").strip()
+    if error:
+        return _redirect(f"/?spotify_error={quote(error)}")
+    code = (request.args.get("code") or "").strip()
+    state = (request.args.get("state") or "").strip()
+    if not code or not state:
+        return jsonify({"ok": False, "error": "Missing code or state."}), 400
+    with SPOTIFY_OAUTH_PENDING_LOCK:
+        _cleanup_oauth_states()
+        pending = SPOTIFY_OAUTH_PENDING.pop(state, None)
+    if not pending:
+        return jsonify({
+            "ok": False,
+            "error": "OAuth state is unknown or expired. Please retry login.",
+        }), 400
+    try:
+        token_resp = _spotify_request_token({
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": SPOTIFY_REDIRECT_URI,
+            "code_verifier": pending["code_verifier"],
+        })
+    except requests.HTTPError as exc:
+        body = exc.args[0] if exc.args else {}
+        return jsonify({
+            "ok": False,
+            "error": "Spotify rejected the authorization code.",
+            "spotify_error": body if isinstance(body, dict) else str(body),
+        }), 400
+    access_token = token_resp.get("access_token") or ""
+    refresh_token = token_resp.get("refresh_token") or ""
+    scopes = token_resp.get("scope") or SPOTIFY_OAUTH_SCOPES
+    if not access_token or not refresh_token:
+        return jsonify({"ok": False, "error": "Spotify did not return both tokens."}), 502
+    me = requests.get(
+        f"{SPOTIFY_API_BASE}/me",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=15,
+    )
+    if me.status_code != 200:
+        return jsonify({
+            "ok": False,
+            "error": f"Could not fetch Spotify profile: HTTP {me.status_code}",
+        }), 502
+    me_json = me.json()
+    spotify_user_id = (me_json.get("id") or "").strip()
+    if not spotify_user_id:
+        return jsonify({"ok": False, "error": "Spotify /me response had no user id."}), 502
+    images = me_json.get("images") or []
+    avatar_url = (images[0].get("url") if images else "") or ""
+    db.upsert_spotify_profile(
+        spotify_user_id,
+        display_name=me_json.get("display_name") or spotify_user_id,
+        avatar_url=avatar_url,
+        refresh_token_encrypted=_encrypt_refresh_token(refresh_token),
+        scopes=scopes,
+    )
+    # Cache this access token under the user id so the immediate first
+    # request to a Spotify-backed endpoint avoids a refresh round-trip.
+    expires_in = int(token_resp.get("expires_in") or 3600)
+    with SPOTIFY_ACCESS_TOKENS_LOCK:
+        SPOTIFY_ACCESS_TOKENS[spotify_user_id] = {
+            "access_token": access_token,
+            "expires_at": time.time() + expires_in,
+        }
+    session_id = secrets.token_urlsafe(32)
+    db.create_spotify_session(spotify_user_id, session_id)
+    resp = _redirect("/")
+    # HttpOnly so client-side JS can't read it (defense against XSS).
+    # SameSite=Lax allows cross-site GET navigation back from accounts.spotify.com.
+    resp.set_cookie(
+        SPOTIFY_SESSION_COOKIE,
+        session_id,
+        max_age=SPOTIFY_SESSION_COOKIE_MAX_AGE,
+        secure=request.is_secure,
+        httponly=True,
+        samesite="Lax",
+        path="/",
+    )
+    return resp
+
+
+@app.route("/api/spotify/logout", methods=["POST"])
+def spotify_logout():
+    sid = _read_spotify_session_id()
+    if sid:
+        db.delete_spotify_session(sid)
+    resp = jsonify({"ok": True})
+    resp.delete_cookie(SPOTIFY_SESSION_COOKIE, path="/")
+    return resp
+
+
 @app.route("/api/spotify/upload", methods=["POST"])
 def spotify_upload():
     """Import Spotify Extended Streaming History from JSON or ZIP files.
 
     Multipart form fields:
-      - profile_id: user-chosen display name
       - files: one or more uploaded files (.json or .zip)
+
+    Identity comes from the session cookie set by /api/spotify/callback.
+    Spotify user id (returned by /me) is the partition key for all stored
+    data, so the same Spotify login on any device sees the same imports.
 
     The actual parse + DB import happens in a background thread because
     large libraries can easily take longer than Azure Container Apps' ingress
-    timeout (~4 min). This endpoint:
-      1. Validates the request and the upload size.
-      2. Streams uploaded files to temp files on disk.
-      3. Issues a token if the profile is brand new.
-      4. Spawns a worker thread and returns HTTP 202 with `{job_id}`.
-
-    The client polls `/api/spotify/import-progress?job_id=` for status.
+    timeout (~4 min). Returns HTTP 202 + `{job_id}`; client polls
+    /api/spotify/import-progress for status.
     """
-    profile_id = (request.form.get("profile_id") or "").strip()
-    if not profile_id:
-        return jsonify({"ok": False, "error": "profile_id is required"}), 400
-    if len(profile_id) > 80:
-        return jsonify({"ok": False, "error": "profile_id is too long (max 80 chars)"}), 400
+    profile_id = _require_spotify_session()
 
     files = request.files.getlist("files")
     if not files:
         return jsonify({"ok": False, "error": "At least one file is required"}), 400
-
-    profile_exists = db.spotify_profile_exists(profile_id)
-    # Two recovery paths for stranded profiles where the original uploader can
-    # no longer prove ownership:
-    #
-    #   1. Empty profile  → user disconnected/cleared and lost their token.
-    #      The profile row exists but has zero plays, so nothing of value is
-    #      lost by re-claiming it.
-    #
-    #   2. Never-accessed profile (the "504 orphan") → a previous upload
-    #      created the profile and started writing plays, but the response
-    #      (containing the token cookie) never reached the client because
-    #      ingress timed out. We can detect this because no one has ever
-    #      authenticated successfully against the profile (Cosmos backend
-    #      tracks `last_accessed_at` separately from `created_at`).
-    #
-    # In both cases the recovery only fires if the request lacks a valid token
-    # — anyone with the correct token can keep re-uploading normally.
-    if profile_exists:
-        token = _read_spotify_token_from_request()
-        token_ok = bool(token) and db.verify_spotify_token(profile_id, _hash_spotify_token(token))
-        if not token_ok:
-            try:
-                empty = not db.has_spotify_data(profile_id)
-                never_accessed = not db.spotify_profile_was_accessed(profile_id)
-            except Exception as exc:
-                app.logger.exception(
-                    "spotify upload: failed to inspect profile profile_id=%r", profile_id,
-                )
-                return jsonify({
-                    "ok": False,
-                    "error": f"Could not check existing profile: {exc}",
-                    "exception_type": exc.__class__.__name__,
-                }), 500
-            if empty or never_accessed:
-                try:
-                    if not empty:
-                        # Wipe the orphaned plays so the new uploader starts clean.
-                        app.logger.info(
-                            "spotify upload reclaiming orphan profile profile_id=%r",
-                            profile_id,
-                        )
-                        db.clear_spotify_data(profile_id)
-                    db.delete_spotify_profile(profile_id)
-                except Exception as exc:
-                    app.logger.exception(
-                        "spotify upload: failed to reclaim orphan profile profile_id=%r",
-                        profile_id,
-                    )
-                    return jsonify({
-                        "ok": False,
-                        "error": (
-                            "Could not re-claim the existing profile with that name. "
-                            f"Try a different display name. (Underlying error: {exc})"
-                        ),
-                        "exception_type": exc.__class__.__name__,
-                    }), 500
-                profile_exists = False
-
-    is_new_profile = not profile_exists
-    issued_token = ""
-    if is_new_profile:
-        issued_token = secrets.token_urlsafe(32)
-        try:
-            db.create_spotify_profile(profile_id, _hash_spotify_token(issued_token))
-        except Exception as exc:
-            app.logger.exception("failed to create spotify profile profile_id=%r", profile_id)
-            return jsonify({"ok": False, "error": f"Could not create profile: {exc}"}), 500
-    else:
-        # Profile exists with data and the request has a valid token (we
-        # already checked above). Re-verify here so the standard 403 path
-        # still triggers if something went wrong between the checks.
-        token = _read_spotify_token_from_request()
-        if not token or not db.verify_spotify_token(profile_id, _hash_spotify_token(token)):
-            return jsonify({
-                "ok": False,
-                "error": (
-                    f"The display name '{profile_id}' is already in use by a different upload. "
-                    "Pick a different name, or click Disconnect first if this is your data."
-                ),
-            }), 403
 
     # Stream uploads to temp files so the worker thread can read them after
     # the request has returned. We accept .json and .zip; anything else is
@@ -1339,7 +1556,6 @@ def spotify_upload():
                 tmp.close()
             saved.append((f.filename, tmp.name, is_zip))
     except Exception as exc:
-        # Clean up anything we wrote so far, then surface the error.
         for _, path, _is_zip in saved:
             try:
                 os.unlink(path)
@@ -1373,36 +1589,12 @@ def spotify_upload():
     )
     worker.start()
 
-    response_body = {
+    resp = jsonify({
         "ok": True,
         "job_id": job_id,
-        "profile_id": profile_id,
         "files_queued": len(saved),
-    }
-    if issued_token:
-        response_body["token"] = issued_token
-    resp = jsonify(response_body)
+    })
     resp.status_code = 202
-    if issued_token:
-        # Persist the token + profile id in cookies so a returning visitor can
-        # auto-reconnect without re-uploading.
-        max_age = 365 * 24 * 60 * 60
-        resp.set_cookie(
-            SPOTIFY_TOKEN_COOKIE,
-            issued_token,
-            max_age=max_age,
-            samesite="Lax",
-            httponly=False,
-            path="/",
-        )
-        resp.set_cookie(
-            SPOTIFY_PROFILE_COOKIE,
-            profile_id,
-            max_age=max_age,
-            samesite="Lax",
-            httponly=False,
-            path="/",
-        )
     return resp
 
 
@@ -1449,7 +1641,6 @@ def _run_spotify_import_job(job_id: str, profile_id: str, saved: list[tuple[str,
             active=False,
             error=str(exc) or exc.__class__.__name__,
         )
-        # Make sure any remaining temp files are cleaned up.
         for _, path, _is_zip in saved:
             try:
                 os.unlink(path)
@@ -1470,56 +1661,106 @@ def _run_spotify_import_job(job_id: str, profile_id: str, saved: list[tuple[str,
 @app.route("/api/spotify/import-progress")
 def spotify_import_progress():
     """Poll endpoint for an in-flight Spotify import job."""
+    profile_id = _require_spotify_session()
     job_id = (request.args.get("job_id") or "").strip()
     if not job_id:
         return jsonify({"ok": False, "error": "job_id is required"}), 400
     payload = get_spotify_import_job(job_id)
     if payload is None:
         return jsonify({"ok": False, "error": "Unknown or expired job_id"}), 404
+    # Only the owning user can see their own job.
+    if payload.get("profile_id") and payload["profile_id"] != profile_id:
+        return jsonify({"ok": False, "error": "Job belongs to a different user."}), 403
     payload["ok"] = True
     return jsonify(payload)
 
 
 @app.route("/api/spotify/status")
 def spotify_status():
-    profile_id = (request.args.get("profile_id") or "").strip()
+    """Return the current login state and (if logged in) profile + stats."""
+    profile_id = _current_spotify_user()
     if not profile_id:
-        return jsonify({"ok": False, "error": "profile_id is required"}), 400
-    if not db.spotify_profile_exists(profile_id):
-        return jsonify({"ok": False, "error": "Profile not found"}), 404
-    _verify_spotify_access(profile_id)
+        return jsonify({
+            "ok": True,
+            "logged_in": False,
+            "oauth_configured": _spotify_oauth_configured(),
+        })
+    profile = db.get_spotify_profile(profile_id) or {}
     return jsonify({
         "ok": True,
+        "logged_in": True,
+        "oauth_configured": True,
         "profile_id": profile_id,
+        "display_name": profile.get("display_name") or profile_id,
+        "avatar_url": profile.get("avatar_url") or "",
+        "last_sync_at": profile.get("last_sync_at") or "",
         "has_data": db.has_spotify_data(profile_id),
+        "stats": db.get_spotify_stats(profile_id),
+    })
+
+
+@app.route("/api/spotify/sync", methods=["POST"])
+def spotify_sync():
+    """Pull the most-recent ~50 plays from Spotify and append them.
+
+    Spotify exposes only the last ~50 tracks via /me/player/recently-played,
+    so this is a top-up — the GDPR export upload is still the only path to
+    multi-year history. Deduplication uses the deterministic play-doc id.
+    """
+    profile_id = _require_spotify_session()
+    access_token = _get_valid_access_token(profile_id)
+    resp = requests.get(
+        f"{SPOTIFY_API_BASE}/me/player/recently-played",
+        params={"limit": 50},
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=15,
+    )
+    if resp.status_code == 401:
+        # Token invalidated between cache and call; clear and ask the user to retry.
+        with SPOTIFY_ACCESS_TOKENS_LOCK:
+            SPOTIFY_ACCESS_TOKENS.pop(profile_id, None)
+        return jsonify({"ok": False, "error": "Spotify rejected our token. Please retry."}), 401
+    if resp.status_code != 200:
+        return jsonify({
+            "ok": False,
+            "error": f"Spotify recently-played returned HTTP {resp.status_code}",
+        }), 502
+    items = (resp.json() or {}).get("items") or []
+    plays = []
+    filtered = 0
+    for it in items:
+        play = _spotify_play_from_recently_played_item(it)
+        if play:
+            plays.append(play)
+        else:
+            filtered += 1
+    inserted = db.save_spotify_plays(profile_id, plays) if plays else 0
+    db.update_spotify_last_sync(profile_id)
+    return jsonify({
+        "ok": True,
+        "fetched": len(items),
+        "imported": inserted,
+        "filtered": filtered,
         "stats": db.get_spotify_stats(profile_id),
     })
 
 
 @app.route("/api/spotify/data", methods=["DELETE"])
 def spotify_clear_data():
-    profile_id = (request.args.get("profile_id") or "").strip()
-    if not profile_id:
-        return jsonify({"ok": False, "error": "profile_id is required"}), 400
-    if not db.spotify_profile_exists(profile_id):
-        return jsonify({"ok": False, "error": "Profile not found"}), 404
-    _verify_spotify_access(profile_id)
+    profile_id = _require_spotify_session()
     delete_profile = (request.args.get("delete_profile") or "").lower() in ("1", "true", "yes")
     deleted = db.clear_spotify_data(profile_id)
     if delete_profile:
         db.delete_spotify_profile(profile_id)
+        with SPOTIFY_ACCESS_TOKENS_LOCK:
+            SPOTIFY_ACCESS_TOKENS.pop(profile_id, None)
     return jsonify({"ok": True, "deleted": deleted, "profile_deleted": delete_profile})
 
 
 @app.route("/api/spotify/search")
 def spotify_search():
-    profile_id = (request.args.get("profile_id") or "").strip()
+    profile_id = _require_spotify_session()
     query = (request.args.get("q") or "").strip()
-    if not profile_id:
-        return jsonify({"ok": False, "error": "profile_id is required"}), 400
-    if not db.spotify_profile_exists(profile_id):
-        return jsonify({"ok": False, "error": "Profile not found"}), 404
-    _verify_spotify_access(profile_id)
     if len(query) < 2:
         return jsonify([])
     rows = db.search_spotify_tracks(profile_id, query, limit=20)
@@ -2149,6 +2390,11 @@ def first_listen():
     username = request.args.get("username", "").strip()
     profile_id = request.args.get("profile_id", "").strip()
     hint_timestamp = request.args.get("hint_timestamp", "").strip() or None
+    # If the caller is logged in via Spotify OAuth, default profile_id to their
+    # session identity so the Spotify-first branch fires without needing the
+    # client to pass profile_id explicitly.
+    if not profile_id:
+        profile_id = _current_spotify_user() or ""
 
     if not track or not artist:
         finish_lookup_progress(
@@ -2177,27 +2423,27 @@ def first_listen():
     if not lookup_id:
         lookup_id = f"server-{int(time.time() * 1000)}"
 
-    # Spotify-first resolution: if a profile_id + valid token is supplied and
-    # the play exists in the imported history, return it immediately.
-    if profile_id and db.spotify_profile_exists(profile_id):
-        token = _read_spotify_token_from_request()
-        if token and db.verify_spotify_token(profile_id, _hash_spotify_token(token)):
-            spotify_payload = _spotify_first_listen_payload(profile_id, track, artist)
-            if spotify_payload:
-                spotify_payload["elapsed_ms"] = elapsed_ms()
-                finish_lookup_progress(
-                    lookup_id,
-                    profile_id=profile_id,
-                    artist=spotify_payload["artist"],
-                    track=spotify_payload["track"],
-                    stage="spotify-hit",
-                    status="Found in your Spotify history",
-                    detail="Returned the earliest play from your imported Spotify Extended Streaming History.",
-                    pages_checked=1,
-                    pages_total=1,
-                    result=spotify_payload,
-                )
-                return jsonify(spotify_payload)
+    # Spotify-first resolution: if the user is logged in via OAuth and the
+    # play exists in their imported history, return it immediately.
+    spotify_user = _current_spotify_user()
+    if spotify_user:
+        profile_id = spotify_user
+        spotify_payload = _spotify_first_listen_payload(profile_id, track, artist)
+        if spotify_payload:
+            spotify_payload["elapsed_ms"] = elapsed_ms()
+            finish_lookup_progress(
+                lookup_id,
+                profile_id=profile_id,
+                artist=spotify_payload["artist"],
+                track=spotify_payload["track"],
+                stage="spotify-hit",
+                status="Found in your Spotify history",
+                detail="Returned the earliest play from your imported Spotify Extended Streaming History.",
+                pages_checked=1,
+                pages_total=1,
+                result=spotify_payload,
+            )
+            return jsonify(spotify_payload)
 
     # If Last.fm is not connected we can't go further — return not found.
     if not username:
@@ -2426,6 +2672,8 @@ def artist_first_listen():
     username = request.args.get("username", "").strip()
     artist = request.args.get("artist", "").strip()
     profile_id = request.args.get("profile_id", "").strip()
+    if not profile_id:
+        profile_id = _current_spotify_user() or ""
 
     if not artist:
         return jsonify({"error": "artist is required"}), 400
@@ -2433,25 +2681,25 @@ def artist_first_listen():
         return jsonify({"error": "username or profile_id is required"}), 400
 
     # Spotify-first
-    if profile_id and db.spotify_profile_exists(profile_id):
-        token = _read_spotify_token_from_request()
-        if token and db.verify_spotify_token(profile_id, _hash_spotify_token(token)):
-            row = db.get_spotify_artist_first_listen(profile_id, artist)
-            if row:
-                ts = int(row.get("played_at_unix") or 0)
-                date_text = (
-                    datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%d %b %Y, %H:%M")
-                    if ts else (row.get("played_at") or "")
-                )
-                return jsonify({
-                    "artist": row.get("artist", artist),
-                    "username": username,
-                    "profile_id": profile_id,
-                    "first_listen_date": date_text,
-                    "first_listen_timestamp": str(ts) if ts else "",
-                    "first_listen_track": row.get("track", ""),
-                    "source": "spotify",
-                })
+    spotify_user = _current_spotify_user()
+    if spotify_user:
+        profile_id = spotify_user
+        row = db.get_spotify_artist_first_listen(profile_id, artist)
+        if row:
+            ts = int(row.get("played_at_unix") or 0)
+            date_text = (
+                datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%d %b %Y, %H:%M")
+                if ts else (row.get("played_at") or "")
+            )
+            return jsonify({
+                "artist": row.get("artist", artist),
+                "username": username,
+                "profile_id": profile_id,
+                "first_listen_date": date_text,
+                "first_listen_timestamp": str(ts) if ts else "",
+                "first_listen_track": row.get("track", ""),
+                "source": "spotify",
+            })
 
     if not username:
         return jsonify({
