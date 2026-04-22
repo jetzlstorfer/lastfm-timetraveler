@@ -1608,8 +1608,18 @@
 
     (async () => {
       try {
-        const res = await fetch('/api/status');
-        const data = await res.json();
+        // Paint last-known Spotify state from localStorage immediately so a
+        // returning logged-in user sees their profile without waiting for the
+        // /api/spotify/status round-trip (slow on cold-started Container App).
+        const hadCachedSpotify = loadCachedSpotifyStatus();
+        // Fetch app config and Spotify session state in parallel — Spotify
+        // status is the slower call on a cold-started Container App and we
+        // don't want it to block initial UI.
+        const [statusRes, spotifyOk] = await Promise.all([
+          fetch('/api/status'),
+          refreshSpotifyStatus(),
+        ]);
+        const data = await statusRes.json();
         if (!data.ok) {
           bannerMsg.innerHTML = data.error;
           configBanner.classList.add('show');
@@ -1625,14 +1635,16 @@
             // Strip the query so a refresh doesn't keep showing it.
             history.replaceState(null, '', location.pathname);
           }
-          // Refresh Spotify session state from the server (cookie is HttpOnly).
-          await refreshSpotifyStatus();
           const saved = getCookie('lastfm_username');
           if (saved) {
             usernameInput.value = saved;
-            connectUser(saved);
-          } else if (spotifyHasData) {
-            // Spotify-only flow: reveal the search section without a Last.fm username.
+            // Optimistic: render the user UI immediately, validate in the
+            // background. Avoids the visible 5s wait for /api/user/validate
+            // (Last.fm `user.getInfo` round-trip).
+            connectUser(saved, { optimistic: true });
+          } else if (spotifyLoggedIn) {
+            // Logged in via Spotify — go straight to search mode, no Last.fm
+            // username needed. Works even before any history is uploaded.
             enterSearchMode();
           }
         }
@@ -1648,24 +1660,50 @@
         if (!res.ok) return;
         const body = await res.json();
         if (!body.ok) return;
-        spotifyOAuthConfigured = !!body.oauth_configured;
-        spotifyLoggedIn = !!body.logged_in;
-        if (spotifyLoggedIn) {
-          spotifyProfileId = body.profile_id || '';
-          spotifyDisplayName = body.display_name || spotifyProfileId;
-          spotifyAvatarUrl = body.avatar_url || '';
-          spotifyHasData = !!body.has_data;
-          spotifyStats = body.stats || null;
-        } else {
-          spotifyProfileId = '';
-          spotifyDisplayName = '';
-          spotifyAvatarUrl = '';
-          spotifyHasData = false;
-          spotifyStats = null;
-        }
-        renderSpotifyCard();
+        applySpotifyStatus(body);
+        // Cache for next page load so we can render optimistically without
+        // waiting on the (slow on cold start) /api/spotify/status round-trip.
+        try {
+          if (body.logged_in) {
+            localStorage.setItem('spotify_status_cache', JSON.stringify(body));
+          } else {
+            localStorage.removeItem('spotify_status_cache');
+          }
+        } catch { /* storage may be unavailable */ }
       } catch {
         // Network blip — leave UI as-is.
+      }
+    }
+
+    function applySpotifyStatus(body) {
+      spotifyOAuthConfigured = !!body.oauth_configured;
+      spotifyLoggedIn = !!body.logged_in;
+      if (spotifyLoggedIn) {
+        spotifyProfileId = body.profile_id || '';
+        spotifyDisplayName = body.display_name || spotifyProfileId;
+        spotifyAvatarUrl = body.avatar_url || '';
+        spotifyHasData = !!body.has_data;
+        spotifyStats = body.stats || null;
+      } else {
+        spotifyProfileId = '';
+        spotifyDisplayName = '';
+        spotifyAvatarUrl = '';
+        spotifyHasData = false;
+        spotifyStats = null;
+      }
+      renderSpotifyCard();
+    }
+
+    function loadCachedSpotifyStatus() {
+      try {
+        const raw = localStorage.getItem('spotify_status_cache');
+        if (!raw) return false;
+        const body = JSON.parse(raw);
+        if (!body || !body.logged_in) return false;
+        applySpotifyStatus(body);
+        return true;
+      } catch {
+        return false;
       }
     }
 
@@ -1734,6 +1772,7 @@
       try {
         await fetch('/api/spotify/logout', { method: 'POST' });
       } catch {}
+      try { localStorage.removeItem('spotify_status_cache'); } catch {}
       spotifyLoggedIn = false;
       spotifyProfileId = '';
       spotifyDisplayName = '';
@@ -1936,15 +1975,33 @@
       howItWorks.style.display = '';
     });
 
-    async function connectUser(username) {
+    async function connectUser(username, { optimistic = false } = {}) {
       connectBtn.disabled = true;
       connectBtn.textContent = '...';
+
+      // Optimistic mode: paint the UI immediately with what we already know
+      // from the cookie, so a returning user never has to wait on a Last.fm
+      // API round-trip before seeing the search box.
+      if (optimistic) {
+        currentUsername = username;
+        document.getElementById('user-avatar').src = defaultAvatar();
+        document.getElementById('user-display-name').textContent = username;
+        document.getElementById('user-stats').textContent = '…';
+        usernameBar.style.display = 'none';
+        userProfile.classList.add('show');
+        searchSection.classList.add('show');
+        howItWorks.style.display = 'none';
+        // Kick off auxiliary loads in parallel — they don't block the search box.
+        loadTopTracks();
+        loadOnThisDay();
+        loadRecentSearches();
+      }
 
       try {
         const res = await fetch(`/api/user/validate?username=${encodeURIComponent(username)}`);
         const data = await res.json();
         if (!data.ok) {
-          alert(data.error);
+          if (!optimistic) alert(data.error);
           connectBtn.disabled = false;
           connectBtn.textContent = 'Connect';
           return;
@@ -1959,17 +2016,19 @@
         document.getElementById('user-stats').textContent =
           `${data.playcount.toLocaleString()} scrobbles` + (registered ? ` · since ${registered}` : '');
 
-        usernameBar.style.display = 'none';
-        userProfile.classList.add('show');
-        searchSection.classList.add('show');
-        searchInput.focus();
-        howItWorks.style.display = 'none';
+        if (!optimistic) {
+          usernameBar.style.display = 'none';
+          userProfile.classList.add('show');
+          searchSection.classList.add('show');
+          searchInput.focus();
+          howItWorks.style.display = 'none';
 
-        loadTopTracks();
-        loadOnThisDay();
-        loadRecentSearches();
+          loadTopTracks();
+          loadOnThisDay();
+          loadRecentSearches();
+        }
       } catch {
-        alert('Could not connect. Please try again.');
+        if (!optimistic) alert('Could not connect. Please try again.');
       }
 
       connectBtn.disabled = false;
