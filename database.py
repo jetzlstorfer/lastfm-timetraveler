@@ -790,6 +790,39 @@ def spotify_profile_exists(profile_id: str) -> bool:
     return row is not None
 
 
+def spotify_profile_was_accessed(profile_id: str) -> bool:
+    """Return True if the profile has ever been successfully verified.
+
+    Used to detect the "504 orphan" scenario: when a previous upload created
+    the profile and issued a token but the response never reached the client
+    (e.g. ingress timeout), the profile exists but no one ever proved
+    ownership. In that case it's safe to let a fresh upload re-claim it.
+
+    A profile counts as accessed iff `last_accessed_at` is present and
+    strictly later than `created_at`. The `verify_spotify_token` Cosmos
+    branch is responsible for keeping `last_accessed_at` fresh on every
+    authenticated request.
+
+    SQLite profiles are always considered accessed (the SQLite backend
+    doesn't track this and the local-dev workflow doesn't have the
+    timeout-orphan problem).
+    """
+    if _use_cosmos_backend():
+        container = _spotify_profiles_container()
+        normalized = _normalize_lookup_value(profile_id)
+        try:
+            item = container.read_item(item=normalized, partition_key=normalized)
+        except cosmos_exceptions.CosmosResourceNotFoundError:
+            return False
+        last = (item.get("last_accessed_at") or "").strip()
+        created = (item.get("created_at") or "").strip()
+        if not last:
+            return False
+        return last != created
+
+    return True
+
+
 def verify_spotify_token(profile_id: str, token_hash: str) -> bool:
     """Return True iff *(profile_id, token_hash)* matches a stored profile.
 

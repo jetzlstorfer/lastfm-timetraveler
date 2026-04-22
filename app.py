@@ -1150,6 +1150,15 @@ def _request_too_large(exc):  # noqa: ARG001
     }), 413
 
 
+@app.errorhandler(403)
+def _forbidden_json(exc):
+    """Return a JSON 403 for /api/ routes so the UI can surface the message."""
+    if request.path.startswith("/api/"):
+        description = getattr(exc, "description", None) or "Forbidden."
+        return jsonify({"ok": False, "error": description}), 403
+    return exc
+
+
 @app.route("/api/spotify/upload", methods=["POST"])
 def spotify_upload():
     """Import Spotify Extended Streaming History from JSON or ZIP files.
@@ -1179,14 +1188,44 @@ def spotify_upload():
         return jsonify({"ok": False, "error": "At least one file is required"}), 400
 
     profile_exists = db.spotify_profile_exists(profile_id)
-    # Allow re-claiming an empty profile (e.g. user disconnected/cleared and lost their token)
-    # by deleting the dangling profile record. If the profile still has data, the original
-    # token is required.
-    if profile_exists and not db.has_spotify_data(profile_id):
+    # Two recovery paths for stranded profiles where the original uploader can
+    # no longer prove ownership:
+    #
+    #   1. Empty profile  → user disconnected/cleared and lost their token.
+    #      The profile row exists but has zero plays, so nothing of value is
+    #      lost by re-claiming it.
+    #
+    #   2. Never-accessed profile (the "504 orphan") → a previous upload
+    #      created the profile and started writing plays, but the response
+    #      (containing the token cookie) never reached the client because
+    #      ingress timed out. We can detect this because no one has ever
+    #      authenticated successfully against the profile (Cosmos backend
+    #      tracks `last_accessed_at` separately from `created_at`).
+    #
+    # In both cases the recovery only fires if the request lacks a valid token
+    # — anyone with the correct token can keep re-uploading normally.
+    if profile_exists:
         token = _read_spotify_token_from_request()
-        if not token or not db.verify_spotify_token(profile_id, _hash_spotify_token(token)):
-            db.delete_spotify_profile(profile_id)
-            profile_exists = False
+        token_ok = bool(token) and db.verify_spotify_token(profile_id, _hash_spotify_token(token))
+        if not token_ok:
+            empty = not db.has_spotify_data(profile_id)
+            never_accessed = not db.spotify_profile_was_accessed(profile_id)
+            if empty or never_accessed:
+                if not empty:
+                    # Wipe the orphaned plays so the new uploader starts clean.
+                    app.logger.info(
+                        "spotify upload reclaiming orphan profile profile_id=%r",
+                        profile_id,
+                    )
+                    try:
+                        db.clear_spotify_data(profile_id)
+                    except Exception:
+                        app.logger.exception(
+                            "failed to clear orphan spotify data profile_id=%r",
+                            profile_id,
+                        )
+                db.delete_spotify_profile(profile_id)
+                profile_exists = False
 
     is_new_profile = not profile_exists
     issued_token = ""
@@ -1198,7 +1237,18 @@ def spotify_upload():
             app.logger.exception("failed to create spotify profile profile_id=%r", profile_id)
             return jsonify({"ok": False, "error": f"Could not create profile: {exc}"}), 500
     else:
-        _verify_spotify_access(profile_id)
+        # Profile exists with data and the request has a valid token (we
+        # already checked above). Re-verify here so the standard 403 path
+        # still triggers if something went wrong between the checks.
+        token = _read_spotify_token_from_request()
+        if not token or not db.verify_spotify_token(profile_id, _hash_spotify_token(token)):
+            return jsonify({
+                "ok": False,
+                "error": (
+                    f"The display name '{profile_id}' is already in use by a different upload. "
+                    "Pick a different name, or click Disconnect first if this is your data."
+                ),
+            }), 403
 
     # Stream uploads to temp files so the worker thread can read them after
     # the request has returned. We accept .json and .zip; anything else is
