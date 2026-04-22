@@ -1159,6 +1159,45 @@ def _forbidden_json(exc):
     return exc
 
 
+@app.errorhandler(500)
+def _server_error_json(exc):
+    """Return a JSON 500 for /api/ routes so the UI can surface a useful message."""
+    if request.path.startswith("/api/"):
+        # exc.original_exception is set when the handler is invoked from an
+        # uncaught exception (Flask >=2.0). Fall back to the description.
+        original = getattr(exc, "original_exception", None) or exc
+        message = str(original) or original.__class__.__name__
+        return jsonify({
+            "ok": False,
+            "error": f"Server error: {message}",
+            "exception_type": original.__class__.__name__,
+        }), 500
+    return exc
+
+
+@app.errorhandler(Exception)
+def _unhandled_exception_json(exc):
+    """Catch-all for unhandled exceptions on /api/ routes.
+
+    Flask's default behavior is to render an HTML error page, which the JS
+    UI cannot parse — the user just sees a generic "HTTP 500". This handler
+    logs the full traceback and returns a JSON body with the exception type
+    and message so the UI can show something useful.
+    """
+    if not request.path.startswith("/api/"):
+        raise exc
+    # Re-raise HTTPException-derived errors so their own handlers run.
+    from werkzeug.exceptions import HTTPException
+    if isinstance(exc, HTTPException):
+        return exc
+    app.logger.exception("unhandled exception on %s", request.path)
+    return jsonify({
+        "ok": False,
+        "error": f"Server error: {exc}" if str(exc) else f"Server error: {exc.__class__.__name__}",
+        "exception_type": exc.__class__.__name__,
+    }), 500
+
+
 @app.route("/api/spotify/upload", methods=["POST"])
 def spotify_upload():
     """Import Spotify Extended Streaming History from JSON or ZIP files.
@@ -1208,23 +1247,41 @@ def spotify_upload():
         token = _read_spotify_token_from_request()
         token_ok = bool(token) and db.verify_spotify_token(profile_id, _hash_spotify_token(token))
         if not token_ok:
-            empty = not db.has_spotify_data(profile_id)
-            never_accessed = not db.spotify_profile_was_accessed(profile_id)
+            try:
+                empty = not db.has_spotify_data(profile_id)
+                never_accessed = not db.spotify_profile_was_accessed(profile_id)
+            except Exception as exc:
+                app.logger.exception(
+                    "spotify upload: failed to inspect profile profile_id=%r", profile_id,
+                )
+                return jsonify({
+                    "ok": False,
+                    "error": f"Could not check existing profile: {exc}",
+                    "exception_type": exc.__class__.__name__,
+                }), 500
             if empty or never_accessed:
-                if not empty:
-                    # Wipe the orphaned plays so the new uploader starts clean.
-                    app.logger.info(
-                        "spotify upload reclaiming orphan profile profile_id=%r",
-                        profile_id,
-                    )
-                    try:
-                        db.clear_spotify_data(profile_id)
-                    except Exception:
-                        app.logger.exception(
-                            "failed to clear orphan spotify data profile_id=%r",
+                try:
+                    if not empty:
+                        # Wipe the orphaned plays so the new uploader starts clean.
+                        app.logger.info(
+                            "spotify upload reclaiming orphan profile profile_id=%r",
                             profile_id,
                         )
-                db.delete_spotify_profile(profile_id)
+                        db.clear_spotify_data(profile_id)
+                    db.delete_spotify_profile(profile_id)
+                except Exception as exc:
+                    app.logger.exception(
+                        "spotify upload: failed to reclaim orphan profile profile_id=%r",
+                        profile_id,
+                    )
+                    return jsonify({
+                        "ok": False,
+                        "error": (
+                            "Could not re-claim the existing profile with that name. "
+                            f"Try a different display name. (Underlying error: {exc})"
+                        ),
+                        "exception_type": exc.__class__.__name__,
+                    }), 500
                 profile_exists = False
 
     is_new_profile = not profile_exists

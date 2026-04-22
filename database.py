@@ -1094,10 +1094,19 @@ def clear_spotify_data(profile_id: str) -> int:
         count = int(count_items[0]) if count_items else 0
         if count == 0:
             return 0
+        # Try the bulk partition-key delete first (fast, single request). It
+        # may not be available on the SDK (AttributeError) or may be disabled
+        # at the account level (CosmosHttpResponseError 400/403). Fall back to
+        # per-item deletes in either case so the operation always succeeds.
+        bulk_ok = False
         try:
             container.delete_all_items_by_partition_key(normalized)
+            bulk_ok = True
         except AttributeError:
-            # Older SDKs: fall back to per-item delete.
+            pass
+        except cosmos_exceptions.CosmosHttpResponseError:
+            pass
+        if not bulk_ok:
             ids = list(container.query_items(
                 query="SELECT c.id FROM c WHERE c.profile_id_normalized = @p",
                 parameters=[{"name": "@p", "value": normalized}],
