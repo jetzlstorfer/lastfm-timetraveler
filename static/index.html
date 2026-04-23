@@ -1607,18 +1607,27 @@
     }
 
     (async () => {
+      // Paint last-known state from local storage / cookies synchronously, so
+      // a returning user sees both the Spotify profile and the Last.fm
+      // username at the same time — without waiting on the /api/status or
+      // /api/spotify/status round-trips (slow on a cold-started Container
+      // App). Both sides reconcile in the background below.
+      loadCachedSpotifyStatus();
+      const savedUsername = getCookie('lastfm_username');
+      if (savedUsername) {
+        usernameInput.value = savedUsername;
+        // Optimistic: render the user UI immediately, validate in the
+        // background. Avoids the visible 5s wait for /api/user/validate
+        // (Last.fm `user.getInfo` round-trip).
+        connectUser(savedUsername, { optimistic: true });
+      }
+
+      // Kick off the Spotify status refresh in parallel — independent of
+      // /api/status so it never blocks the Last.fm UI.
+      const spotifyPromise = refreshSpotifyStatus();
+
       try {
-        // Paint last-known Spotify state from localStorage immediately so a
-        // returning logged-in user sees their profile without waiting for the
-        // /api/spotify/status round-trip (slow on cold-started Container App).
-        const hadCachedSpotify = loadCachedSpotifyStatus();
-        // Fetch app config and Spotify session state in parallel — Spotify
-        // status is the slower call on a cold-started Container App and we
-        // don't want it to block initial UI.
-        const [statusRes, spotifyOk] = await Promise.all([
-          fetch('/api/status'),
-          refreshSpotifyStatus(),
-        ]);
+        const statusRes = await fetch('/api/status');
         const data = await statusRes.json();
         if (!data.ok) {
           bannerMsg.innerHTML = data.error;
@@ -1635,17 +1644,13 @@
             // Strip the query so a refresh doesn't keep showing it.
             history.replaceState(null, '', location.pathname);
           }
-          const saved = getCookie('lastfm_username');
-          if (saved) {
-            usernameInput.value = saved;
-            // Optimistic: render the user UI immediately, validate in the
-            // background. Avoids the visible 5s wait for /api/user/validate
-            // (Last.fm `user.getInfo` round-trip).
-            connectUser(saved, { optimistic: true });
-          } else if (spotifyLoggedIn) {
-            // Logged in via Spotify — go straight to search mode, no Last.fm
-            // username needed. Works even before any history is uploaded.
-            enterSearchMode();
+          if (!savedUsername) {
+            // No Last.fm cookie — wait for Spotify status to decide whether
+            // to jump straight to search mode (Spotify-only users).
+            await spotifyPromise;
+            if (spotifyLoggedIn) {
+              enterSearchMode();
+            }
           }
         }
       } catch {
