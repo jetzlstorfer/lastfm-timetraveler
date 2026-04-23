@@ -26,7 +26,7 @@ flowchart LR
 
   subgraph storage["Persistence"]
     sqlite[("SQLite<br/>(local dev)")]
-    cosmos[("Azure Cosmos DB<br/>searches / spotify_profiles / spotify_plays")]
+    cosmos[("Azure Cosmos DB<br/>searches / spotify_profiles / spotify_plays / spotify_sessions")]
   end
 
   lastfm[("Last.fm API<br/>+ public library HTML")]
@@ -174,7 +174,7 @@ The app supports two persistence modes, chosen automatically:
 ```mermaid
 flowchart LR
   start([App start]) --> check{COSMOS_CONNECTION_STRING<br/>or COSMOS_ENDPOINT+KEY set?}
-  check -- yes --> cosmos[("Azure Cosmos DB<br/>──────────<br/>searches<br/>spotify_profiles<br/>spotify_plays")]
+  check -- yes --> cosmos[("Azure Cosmos DB<br/>──────────<br/>searches<br/>spotify_profiles<br/>spotify_plays<br/>spotify_sessions")]
   check -- no --> sqlite[("SQLite file<br/>──────────<br/>searches<br/>artist_first_listens<br/>spotify_profiles<br/>spotify_history")]
 ```
 
@@ -217,10 +217,10 @@ azd up
 
 This single command will:
 1. Build and push the Docker image to **Azure Container Registry**
-2. Provision all infrastructure (**Container Apps Environment**, **Container App**, **Log Analytics**, **Azure Cosmos DB for NoSQL** with the three containers above)
+2. Provision all infrastructure (**Container Apps Environment**, **Container App**, **Log Analytics**, **Azure Cosmos DB for NoSQL** with the four containers above)
 3. Deploy the application to **Azure Container Apps**
 
-`azd up` is idempotent — re-running it after the Spotify migration just adds the new `spotify_profiles` and `spotify_plays` containers. **No data migration is needed**: existing Last.fm cache data stays untouched.
+`azd up` is idempotent — re-running it just reconciles any new containers (e.g. `spotify_profiles`, `spotify_plays`, `spotify_sessions`). **No data migration is needed**: existing Last.fm cache data stays untouched.
 
 ### Provisioned topology
 
@@ -239,9 +239,11 @@ flowchart TB
       c1[(searches)]
       c2[(spotify_profiles)]
       c3[(spotify_plays)]
+      c4[(spotify_sessions)]
       db_ns --- c1
       db_ns --- c2
       db_ns --- c3
+      db_ns --- c4
     end
   end
 
@@ -282,7 +284,7 @@ The `.github/workflows/azure-aca-deploy.yml` workflow runs `azd provision` and `
 | `AZURE_ENV_NAME` | Variable | azd environment name |
 | `AZURE_LOCATION` | Variable | Azure region (e.g. `eastus`) |
 | `LASTFM_API_KEY` | **Secret** | Last.fm API key |
-| `SPOTIFY_CLIENT_ID` | Variable | Spotify app client id |
+| `SPOTIFY_CLIENT_ID` | **Secret** | Spotify app client id |
 | `SPOTIFY_CLIENT_SECRET` | **Secret** | Spotify app client secret |
 | `SPOTIFY_REDIRECT_URI` | Variable | OAuth callback URL (`https://<host>/api/spotify/callback`) |
 | `SPOTIFY_TOKEN_ENCRYPTION_KEY` | **Secret** | Fernet key for encrypting refresh tokens at rest |

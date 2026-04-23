@@ -16,7 +16,7 @@ pytest test_app.py::TestFirstListen::test_first_listen_returns_result   # single
 pytest -k "artist"         # run tests matching keyword
 ```
 
-Tests use an `isolated_db` autouse fixture that patches `database.DB_PATH` to a temp file per test — no setup needed. External Last.fm API calls are mocked with `unittest.mock.patch`; see the helper functions `_track_info_response`, `_library_page_html`, and `_recent_tracks_response` at the top of `test_app.py` for building fake responses.
+Tests use an `isolated_db` autouse fixture that patches `database.DB_PATH` to a temp file per test — no setup needed. External Last.fm and Spotify API calls are mocked with `unittest.mock.patch`; see the helper functions `_track_info_response`, `_library_page_html`, and `_recent_tracks_response` at the top of `test_app.py` for building fake responses. Spotify-related tests live in `TestSpotifyOAuth`, `TestSpotifyUpload`, `TestSpotifyAuthEndpoints`, `TestSpotifySync`, and `TestSpotifyFirstListen`.
 
 ## Architecture
 
@@ -24,8 +24,8 @@ Tests use an `isolated_db` autouse fixture that patches `database.DB_PATH` to a 
 
 ### Key files
 
-- `app.py` — all Flask routes and Last.fm scraping/API logic (~1800 lines)
-- `database.py` — persistence abstraction with a unified public API (`get_cached`, `save_result`, `get_history`, etc.) backed by either SQLite (default) or Azure Cosmos DB
+- `app.py` — all Flask routes plus Last.fm scraping, Spotify OAuth/import/sync logic (~2700 lines)
+- `database.py` — persistence abstraction with a unified public API (`get_cached`, `save_result`, `get_history`, plus Spotify helpers like `create_spotify_session`, `bulk_insert_spotify_plays`) backed by either SQLite (default) or Azure Cosmos DB
 - `static/index.html` — the entire frontend (HTML + CSS + JS in one file)
 - `infra/` — Azure Bicep templates for Container Apps deployment
 
@@ -42,7 +42,11 @@ The `/api/first-listen` endpoint returns `202` with a `lookup_id` immediately, t
 
 ### Database abstraction
 
-`database.py` exposes backend-agnostic functions. Backend selection is automatic: if `COSMOS_CONNECTION_STRING` (or `COSMOS_ENDPOINT` + `COSMOS_KEY`) is set, Cosmos is used; otherwise SQLite. Both backends share identical function signatures. Text matching is case-insensitive throughout.
+`database.py` exposes backend-agnostic functions. Backend selection is automatic: if `COSMOS_CONNECTION_STRING` (or `COSMOS_ENDPOINT` + `COSMOS_KEY`) is set, Cosmos is used; otherwise SQLite. Both backends share identical function signatures. Text matching is case-insensitive throughout. The Cosmos deployment uses four containers: `searches` (cache + history), `spotify_profiles` (90-day TTL, refreshed via `SPOTIFY_TOUCH_INTERVAL_SECONDS`), `spotify_plays` (per-user imported listening history, written via `bulk_insert_spotify_plays` with a thread pool sized by `SPOTIFY_BULK_INSERT_WORKERS`), and `spotify_sessions` (30-day rolling TTL).
+
+### Spotify integration
+
+OAuth handshake at `/api/spotify/login` → `/api/spotify/callback`; identity is the Spotify user id returned by `/me`. Refresh tokens are encrypted at rest with `SPOTIFY_TOKEN_ENCRYPTION_KEY` (Fernet). The browser only holds a `spotify_session` cookie that maps to a row in the `spotify_sessions` container. Users can either upload their Spotify "Extended Streaming History" zip via `/api/spotify/upload` (filtered by `SPOTIFY_MIN_MS_PLAYED = 30_000` ms) or pull recently-played tracks via `/api/spotify/sync`. Upload progress lives in an in-memory dict polled via `/api/spotify/import-progress`, mirroring the first-listen lookup pattern.
 
 ### Artist first-listen
 
