@@ -1597,7 +1597,8 @@ class TestSpotifySync:
 
 
 class TestSpotifyFirstListen:
-    def test_first_listen_uses_spotify_when_available(self, client, spotify_oauth_env):
+    def test_first_listen_uses_spotify_when_no_username(self, client, spotify_oauth_env):
+        """Without a Last.fm username the Spotify result is returned directly."""
         _login_spotify(client, "spuser")
         _spotify_upload(client, [
             _spotify_entry("2014-05-05T12:00:00Z", track="MyTrack", artist="MyArtist"),
@@ -1611,6 +1612,34 @@ class TestSpotifyFirstListen:
         assert data["source"] == "spotify"
         assert data["total_scrobbles"] == 3
         from datetime import datetime as _dt, timezone as _tz
+        assert _dt.fromtimestamp(int(data["timestamp"]), tz=_tz.utc).year == 2010
+
+    def test_first_listen_uses_lastfm_when_username_present(self, client, spotify_oauth_env):
+        """When a Last.fm username is provided the Spotify timestamp is used as a
+        hint but Last.fm metadata (scrobble count, canonical names, album art)
+        is fetched via the background lookup."""
+        from datetime import datetime as _dt, timezone as _tz
+        _login_spotify(client, "spuser2")
+        # Spotify history has 2 plays; Last.fm reports 23.
+        spotify_ts = int(_dt(2010, 3, 4, 8, 0, 0, tzinfo=_tz.utc).timestamp())
+        _spotify_upload(client, [
+            _spotify_entry("2014-05-05T12:00:00Z", track="Cough Syrup", artist="Young the Giant"),
+            _spotify_entry("2010-03-04T08:00:00Z", track="Cough Syrup", artist="Young the Giant"),
+        ])
+        with patch("app.lastfm_get", return_value=_track_info_response(
+            23, track="Cough Syrup", artist="Young the Giant", album="Young the Giant",
+        )), patch("app.public_library_first_listen_date", return_value=None), \
+             patch("app.recent_tracks_first_listen", return_value=(None, "")):
+            data, status = _await_first_listen(
+                client,
+                "track=Cough+Syrup&artist=Young+the+Giant&username=jet1985",
+            )
+        assert status == 200
+        assert data["found"] is True
+        # Must use Last.fm scrobble count, not the Spotify play count of 2.
+        assert data["total_scrobbles"] == 23
+        # The Spotify hint timestamp should have been used for the date.
+        assert data["timestamp"] == str(spotify_ts)
         assert _dt.fromtimestamp(int(data["timestamp"]), tz=_tz.utc).year == 2010
 
     def test_artist_first_listen_prefers_spotify(self, client, spotify_oauth_env):
