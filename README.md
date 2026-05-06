@@ -174,8 +174,8 @@ The app supports two persistence modes, chosen automatically:
 ```mermaid
 flowchart LR
   start([App start]) --> check{COSMOS_CONNECTION_STRING<br/>or COSMOS_ENDPOINT+KEY set?}
-  check -- yes --> cosmos[("Azure Cosmos DB<br/>──────────<br/>searches<br/>spotify_profiles<br/>spotify_plays<br/>spotify_sessions")]
-  check -- no --> sqlite[("SQLite file<br/>──────────<br/>searches<br/>artist_first_listens<br/>spotify_profiles<br/>spotify_history")]
+  check -- yes --> cosmos[("Azure Cosmos DB<br/>searches<br/>spotify_profiles<br/>spotify_plays<br/>spotify_sessions")]
+  check -- no --> sqlite[("SQLite file<br/>searches<br/>artist_first_listens<br/>spotify_profiles<br/>spotify_history")]
 ```
 
 | Cosmos container | Partition key | Holds |
@@ -325,6 +325,7 @@ To set up federated credentials (OIDC) for the service principal, follow the [az
 | `POST /api/spotify/logout` | Delete the server-side session and clear the cookie |
 | `GET /api/spotify/status` | Reports `logged_in`, profile id, display name, and import stats |
 | `POST /api/spotify/upload` | Multipart upload of `.json` / `.zip` Spotify history files (session required) |
+| `GET /api/spotify/import-progress` | Poll progress of an in-flight Spotify history import |
 | `POST /api/spotify/sync` | Pull the last 50 plays from Spotify's `recently-played` and append them |
 | `DELETE /api/spotify/data` | Clear imported plays for the logged-in user |
 | `GET /api/spotify/search?q=` | Autocomplete over the user's imported Spotify tracks |
