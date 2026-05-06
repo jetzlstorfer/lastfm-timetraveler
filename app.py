@@ -2424,26 +2424,36 @@ def first_listen():
         lookup_id = f"server-{int(time.time() * 1000)}"
 
     # Spotify-first resolution: if the user is logged in via OAuth and the
-    # play exists in their imported history, return it immediately.
+    # play exists in their imported history, use it as a hint for the Last.fm
+    # lookup when a username is also available.  When there is no username we
+    # return the Spotify result directly.
     spotify_user = _current_spotify_user()
     if spotify_user:
         profile_id = spotify_user
         spotify_payload = _spotify_first_listen_payload(profile_id, track, artist)
         if spotify_payload:
-            spotify_payload["elapsed_ms"] = elapsed_ms()
-            finish_lookup_progress(
-                lookup_id,
-                profile_id=profile_id,
-                artist=spotify_payload["artist"],
-                track=spotify_payload["track"],
-                stage="spotify-hit",
-                status="Found in your Spotify history",
-                detail="Returned the earliest play from your imported Spotify Extended Streaming History.",
-                pages_checked=1,
-                pages_total=1,
-                result=spotify_payload,
-            )
-            return jsonify(spotify_payload)
+            if not username:
+                # No Last.fm username — Spotify is the only source available.
+                spotify_payload["elapsed_ms"] = elapsed_ms()
+                finish_lookup_progress(
+                    lookup_id,
+                    profile_id=profile_id,
+                    artist=spotify_payload["artist"],
+                    track=spotify_payload["track"],
+                    stage="spotify-hit",
+                    status="Found in your Spotify history",
+                    detail="Returned the earliest play from your imported Spotify Extended Streaming History.",
+                    pages_checked=1,
+                    pages_total=1,
+                    result=spotify_payload,
+                )
+                return jsonify(spotify_payload)
+            # A Last.fm username is present — use the Spotify timestamp as a
+            # hint so the background lookup can skip expensive page scanning
+            # while still fetching accurate Last.fm scrobble counts, canonical
+            # metadata, and album art.
+            if not hint_timestamp and spotify_payload.get("timestamp"):
+                hint_timestamp = spotify_payload["timestamp"]
 
     # If Last.fm is not connected we can't go further — return not found.
     if not username:
