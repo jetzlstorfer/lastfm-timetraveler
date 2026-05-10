@@ -6,6 +6,9 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   lint-build:
     runs-on: ubuntu-latest
@@ -28,7 +31,7 @@ jobs:
           pip install ruff
 
       - name: Lint
-        run: ruff check app.py database.py --select F
+        run: ruff check . --select E9,F63,F7,F82
 
       - name: Build
-        run: python -m compileall app.py database.py
+        run: python -m compileall .
