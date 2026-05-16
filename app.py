@@ -2191,6 +2191,11 @@ def search_tracks():
     if not _lastfm_configured():
         # Spotify-only mode: front-end uses /api/spotify/search instead.
         return jsonify([])
+    # Never hit Last.fm if the visitor hasn't provided a Last.fm username.
+    # Without an identified Last.fm user there is nothing to search *for* on
+    # their behalf; the front-end uses /api/spotify/search in that case.
+    if not (request.cookies.get("lastfm_username") or "").strip():
+        return jsonify([])
 
     data = lastfm_get("track.search", track=query, limit=8)
     matches = data.get("results", {}).get("trackmatches", {}).get("track", [])

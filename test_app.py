@@ -292,6 +292,7 @@ class TestSearch:
             ("Song B", "Artist B", 5000),
             ("Song C", "Artist C", 500),
         ])
+        client.set_cookie("lastfm_username", "alice")
         resp = client.get("/api/search?q=song")
         data = resp.get_json()
         assert len(data) == 3
@@ -306,6 +307,14 @@ class TestSearch:
     def test_search_empty_query_returns_empty(self, client):
         resp = client.get("/api/search?q=")
         assert resp.get_json() == []
+
+    @patch.object(app_module, "lastfm_get")
+    def test_search_returns_empty_without_lastfm_username_cookie(self, mock_get, client):
+        """No Last.fm calls should happen if the visitor has not provided a Last.fm username."""
+        resp = client.get("/api/search?q=song")
+        assert resp.status_code == 200
+        assert resp.get_json() == []
+        mock_get.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
