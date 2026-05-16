@@ -736,6 +736,55 @@
       opacity: 0;
     }
 
+    .header-hero {
+      position: relative;
+      overflow: hidden;
+      isolation: isolate;
+    }
+
+    .header-starfield {
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      overflow: hidden;
+      z-index: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(circle at 15% 30%, rgba(213, 16, 7, 0.16), transparent 30%),
+        radial-gradient(circle at 82% 28%, rgba(118, 75, 226, 0.16), transparent 34%),
+        linear-gradient(145deg, rgba(26, 23, 64, 0.55) 0%, rgba(15, 12, 41, 0.35) 100%);
+    }
+
+    .header-star {
+      position: absolute;
+      background: #fff;
+      border-radius: 999px;
+      opacity: 0;
+      animation: headerStarStreak var(--dur) linear infinite;
+    }
+
+    @keyframes headerStarStreak {
+      0% {
+        transform: translateX(0);
+        opacity: 0;
+      }
+      10% {
+        opacity: 0.6;
+      }
+      90% {
+        opacity: 0.6;
+      }
+      100% {
+        transform: translateX(-120vw);
+        opacity: 0;
+      }
+    }
+
+    .header-hero > *:not(.header-starfield) {
+      position: relative;
+      z-index: 1;
+    }
+
     @keyframes starStreak {
       0% {
         transform: translateX(0);
@@ -1039,7 +1088,8 @@
 
   <div class="relative mx-auto flex min-h-screen w-full max-w-7xl flex-col overflow-x-hidden px-4 py-5 sm:px-6 lg:px-8 lg:py-8">
     <header class="mb-6">
-      <section class="glass-panel rounded-[2rem] px-5 py-6 sm:px-7 sm:py-7 lg:px-8 lg:py-8">
+      <section class="glass-panel header-hero rounded-[2rem] px-5 py-6 sm:px-7 sm:py-7 lg:px-8 lg:py-8">
+        <div class="header-starfield" id="header-starfield" aria-hidden="true"></div>
         <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div class="flex items-center gap-4">
             <span class="text-3xl sm:text-4xl">🧑‍🚀🕰️</span>
@@ -1248,8 +1298,8 @@
       </section>
     </main>
 
-    <footer class="pt-8 text-sm text-stone-500">
-      Powered by <a class="text-red-400 transition hover:text-red-300" href="https://www.last.fm/api" target="_blank" rel="noreferrer">Last.fm API</a>
+    <footer class="pt-8 text-sm text-stone-500"> 
+      Maintained on <a class="text-red-400 transition hover:text-red-300" href="https://www.github.com/jetzlstorfer/lastfm-timetraveler" target="_blank" rel="noreferrer">GitHub</a>.
     </footer>
   </div>
 
@@ -1322,6 +1372,7 @@
     const loadingStatusText = document.getElementById('loading-status-text');
     const loadingElapsed = document.getElementById('loading-elapsed');
     const loadingDetail = document.getElementById('loading-detail');
+    const headerStarfield = document.getElementById('header-starfield');
     let yearInterval = null;
     let factInterval = null;
     let loadingPhaseTimeouts = [];
@@ -1412,6 +1463,24 @@
         starfield.appendChild(star);
       }
     }
+
+    function generateHeaderStars() {
+      if (!headerStarfield || headerStarfield.childElementCount > 0) return;
+      for (let i = 0; i < 26; i++) {
+        const star = document.createElement('div');
+        star.className = 'header-star';
+        const size = Math.random() * 2 + 0.8;
+        star.style.width = size + 'px';
+        star.style.height = size + 'px';
+        star.style.top = Math.random() * 100 + '%';
+        star.style.right = '-12px';
+        star.style.setProperty('--dur', (Math.random() * 8 + 10) + 's');
+        star.style.animationDelay = (Math.random() * 9) + 's';
+        headerStarfield.appendChild(star);
+      }
+    }
+
+    generateHeaderStars();
 
     function resetLoadingPhases() {
       loadingPhaseTimeouts.forEach((timeoutId) => clearTimeout(timeoutId));
