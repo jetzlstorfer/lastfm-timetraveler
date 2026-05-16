@@ -1863,12 +1863,12 @@ def ready():
 
     try:
         db.init_db()
-    except Exception as exc:
+    except Exception:
         app.logger.exception("database readiness check failed")
         return jsonify({
             "ok": False,
             "providers": providers,
-            "error": f"Database is not ready: {exc}",
+            "error": "Database is not ready.",
         }), 503
 
     return jsonify({"ok": True, "providers": providers})

@@ -1490,7 +1490,13 @@ _SPOTIFY_PERIOD_SECONDS: dict[str, int | None] = {
 
 
 def _spotify_period_cutoff_unix(period: str) -> int:
-    """Return the unix timestamp cutoff for *period*, or 0 for 'overall'."""
+    """Return the unix timestamp cutoff for *period*, or 0 for 'overall'.
+
+    Unknown period values fall back to the same default as Last.fm
+    (``1month``) rather than raising — this matches the behaviour of the
+    existing Last.fm endpoints which silently accept any period and let the
+    upstream API decide.
+    """
     seconds = _SPOTIFY_PERIOD_SECONDS.get(period, _SPOTIFY_PERIOD_SECONDS["1month"])
     if seconds is None:
         return 0
