@@ -1281,6 +1281,7 @@
     let currentResults = [];
     let configOk = false;
     let currentUsername = '';
+    let lastfmConfigured = false;
 
     // Spotify connection state. Identity comes from the server-side session
     // cookie set by /api/spotify/callback; the JS never touches the cookie.
@@ -1629,8 +1630,14 @@
       try {
         const statusRes = await fetch('/api/status');
         const data = await statusRes.json();
+        const providers = (data && data.providers) || {};
+        lastfmConfigured = !!providers.lastfm;
+        // Show the Last.fm input only when the server is configured for it.
+        // Spotify-only deployments shouldn't surface the Last.fm controls.
+        applyLastfmAvailability();
         if (!data.ok) {
-          bannerMsg.innerHTML = data.error;
+          // Genuine failure: no provider is configured at all.
+          bannerMsg.innerHTML = data.error || 'No data source configured.';
           configBanner.classList.add('show');
           usernameInput.disabled = true;
           connectBtn.disabled = true;
@@ -1650,6 +1657,9 @@
             await spotifyPromise;
             if (spotifyLoggedIn) {
               enterSearchMode();
+              loadTopTracks();
+              loadOnThisDay();
+              loadRecentSearches();
             }
           }
         }
@@ -1658,6 +1668,14 @@
         configBanner.classList.add('show');
       }
     })();
+
+    function applyLastfmAvailability() {
+      // Hide the Last.fm username input row entirely when the server has no
+      // Last.fm key configured. The user can still log in with Spotify.
+      if (!lastfmConfigured) {
+        usernameBar.style.display = 'none';
+      }
+    }
 
     async function refreshSpotifyStatus() {
       try {
@@ -1682,6 +1700,7 @@
 
     function applySpotifyStatus(body) {
       spotifyOAuthConfigured = !!body.oauth_configured;
+      const wasLoggedIn = spotifyLoggedIn;
       spotifyLoggedIn = !!body.logged_in;
       if (spotifyLoggedIn) {
         spotifyProfileId = body.profile_id || '';
@@ -1697,6 +1716,15 @@
         spotifyStats = null;
       }
       renderSpotifyCard();
+      // If we just transitioned to logged-in (cookie restored, OAuth callback,
+      // or post-import refresh) and Last.fm isn't already driving the
+      // landing-page widgets, populate them from Spotify.
+      if (spotifyLoggedIn && !wasLoggedIn && !currentUsername) {
+        enterSearchMode();
+        loadTopTracks();
+        loadOnThisDay();
+        loadRecentSearches();
+      }
     }
 
     function loadCachedSpotifyStatus() {
@@ -1785,6 +1813,19 @@
       spotifyHasData = false;
       spotifyStats = null;
       renderSpotifyCard();
+      // If Last.fm isn't connected, return the page to its initial state.
+      if (!currentUsername) {
+        searchSection.classList.remove('show');
+        topTracksSection.classList.remove('show');
+        otdSection.classList.remove('show');
+        recentSearchesSection.classList.remove('show');
+        howItWorks.style.display = '';
+      } else {
+        // Refresh widgets to reflect Last.fm-only data.
+        loadTopTracks();
+        loadOnThisDay();
+        loadRecentSearches();
+      }
     });
 
     spotifyClearBtn.addEventListener('click', async () => {
@@ -1820,6 +1861,12 @@
           renderSpotifyCard();
           spotifyUploadStatus.textContent =
             `Sync done: fetched ${body.fetched} recent plays, added ${body.imported} new (${body.filtered} filtered).`;
+          // Refresh widgets so newly-added plays show up immediately.
+          if (spotifyLoggedIn) {
+            loadTopTracks();
+            loadOnThisDay();
+            loadRecentSearches();
+          }
         } else {
           showSpotifyError(body.error || `Sync failed (HTTP ${res.status}).`);
         }
@@ -1930,6 +1977,10 @@
             `(<strong>${filtered.toLocaleString()}</strong> filtered${filteredTip}).`;
           renderSpotifyCard();
           enterSearchMode();
+          // Refresh landing-page widgets now that imported plays are available.
+          loadTopTracks();
+          loadOnThisDay();
+          loadRecentSearches();
           return;
         }
         if (payload.stage === 'error') {
@@ -2043,16 +2094,25 @@
     periodSelect.addEventListener('change', () => loadTopTracks());
 
     async function loadTopTracks() {
-      if (!currentUsername) return;
+      // Prefer Spotify when connected (more accurate, instant); fall back to Last.fm.
+      const useSpotify = spotifyLoggedIn;
+      if (!useSpotify && !currentUsername) return;
       const isRecent = periodSelect.value === 'recent';
       document.getElementById('top-tracks-heading').textContent = isRecent ? '🎵 Recent tracks' : '🎵 Your top tracks';
       topTracksGrid.innerHTML = placeholderState(isRecent ? 'Loading recent tracks...' : 'Loading top tracks...');
       topTracksSection.classList.add('show');
 
       try {
-        const url = isRecent
-          ? `/api/user/recent-tracks?username=${encodeURIComponent(currentUsername)}`
-          : `/api/user/top-tracks?username=${encodeURIComponent(currentUsername)}&period=${periodSelect.value}`;
+        let url;
+        if (useSpotify) {
+          url = isRecent
+            ? `/api/user/recent-tracks?profile_id=${encodeURIComponent(spotifyProfileId)}`
+            : `/api/user/top-tracks?profile_id=${encodeURIComponent(spotifyProfileId)}&period=${periodSelect.value}`;
+        } else {
+          url = isRecent
+            ? `/api/user/recent-tracks?username=${encodeURIComponent(currentUsername)}`
+            : `/api/user/top-tracks?username=${encodeURIComponent(currentUsername)}&period=${periodSelect.value}`;
+        }
         const res = await fetch(url);
         const tracks = await res.json();
         if (!tracks.length) {
@@ -2086,13 +2146,17 @@
     }
 
     async function loadOnThisDay() {
-      if (!currentUsername) return;
+      const useSpotify = spotifyLoggedIn;
+      if (!useSpotify && !currentUsername) return;
       otdLoading.style.display = 'inline-flex';
       otdContent.innerHTML = '';
       otdSection.classList.add('show');
 
       try {
-        const res = await fetch(`/api/on-this-day?username=${encodeURIComponent(currentUsername)}`);
+        const url = useSpotify
+          ? `/api/on-this-day?profile_id=${encodeURIComponent(spotifyProfileId)}`
+          : `/api/on-this-day?username=${encodeURIComponent(currentUsername)}`;
+        const res = await fetch(url);
         const periods = await res.json();
         otdLoading.style.display = 'none';
 
@@ -2193,9 +2257,12 @@
     }
 
     async function loadRecentSearches() {
-      if (!currentUsername) return;
+      if (!currentUsername && !spotifyLoggedIn) return;
       try {
-        const res = await fetch(`/api/history?username=${encodeURIComponent(currentUsername)}`);
+        const params = new URLSearchParams();
+        if (currentUsername) params.set('username', currentUsername);
+        if (spotifyLoggedIn && spotifyProfileId) params.set('profile_id', spotifyProfileId);
+        const res = await fetch(`/api/history?${params.toString()}`);
         rsAllItems = await res.json();
         if (!rsAllItems.length) {
           recentSearchesSection.classList.remove('show');
@@ -2507,15 +2574,25 @@
       const chartWrap = document.getElementById('listening-history-chart-wrap');
       const canvas = document.getElementById('listening-history-chart');
       if (!loadingEl || !chartWrap || !canvas) return;
-      if (!currentUsername) {
-        // Listening-history chart relies on Last.fm weekly charts.
+      if (!currentUsername && !spotifyLoggedIn) {
         const section = document.getElementById('listening-history-section');
         if (section) section.style.display = 'none';
         return;
       }
 
       try {
-        const url = `/api/listening-history?username=${encodeURIComponent(currentUsername)}&track=${encodeURIComponent(track)}&artist=${encodeURIComponent(artist)}&months=12`;
+        const params = new URLSearchParams();
+        params.set('track', track);
+        params.set('artist', artist);
+        params.set('months', '12');
+        // Spotify takes priority — instant local aggregation vs. Last.fm chart
+        // walks. Send only one identity so the server picks the right source.
+        if (spotifyLoggedIn && spotifyProfileId) {
+          params.set('profile_id', spotifyProfileId);
+        } else if (currentUsername) {
+          params.set('username', currentUsername);
+        }
+        const url = `/api/listening-history?${params.toString()}`;
         const res = await fetch(url);
         const historyData = await res.json();
 

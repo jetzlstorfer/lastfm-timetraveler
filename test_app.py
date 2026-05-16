@@ -51,6 +51,19 @@ def isolated_db(tmp_path):
         yield db_file
 
 
+@pytest.fixture(autouse=True)
+def default_lastfm_api_key(monkeypatch):
+    """Provide a default LASTFM_API_KEY so Last.fm-only endpoints don't 503.
+
+    Tests that explicitly want the key absent override this with their own
+    ``@patch.object(app_module, "LASTFM_API_KEY", "")`` decorator, which takes
+    precedence because pytest applies decorator patches after the autouse
+    fixture.
+    """
+    monkeypatch.setattr(app_module, "LASTFM_API_KEY", "test-api-key")
+    yield
+
+
 @pytest.fixture
 def client():
     app.config["TESTING"] = True

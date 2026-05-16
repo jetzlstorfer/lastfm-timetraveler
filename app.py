@@ -108,7 +108,24 @@ def is_placeholder(url: str) -> bool:
     return LASTFM_PLACEHOLDER_HASH in url if url else True
 
 
+def _lastfm_configured() -> bool:
+    """True when a usable Last.fm API key is configured."""
+    return bool(LASTFM_API_KEY) and LASTFM_API_KEY != "your_api_key_here"
+
+
+def _lastfm_not_configured_response(status_code: int = 503):
+    """Standard 'Last.fm is not configured' JSON response."""
+    return jsonify({
+        "ok": False,
+        "error": "Last.fm is not configured on this server.",
+    }), status_code
+
+
 def lastfm_get(method: str, **params):
+    if not _lastfm_configured():
+        # Defensive: if a caller forgets to gate on _lastfm_configured() upfront,
+        # raise a clear error rather than firing a request with api_key=None.
+        raise RuntimeError("LASTFM_API_KEY is not set")
     params.update({"method": method, "api_key": LASTFM_API_KEY, "format": "json"})
     last_exc = None
     for attempt in range(3):
@@ -1812,25 +1829,49 @@ def index():
 
 @app.route("/api/status")
 def status():
-    """Health check — verifies API key is configured."""
-    if not LASTFM_API_KEY or LASTFM_API_KEY == "your_api_key_here":
-        return jsonify({"ok": False, "error": "LASTFM_API_KEY is not set. Copy .env.example to .env and add your key."}), 200
-    return jsonify({"ok": True})
+    """Health check — verifies that at least one data source is configured."""
+    lastfm_ok = _lastfm_configured()
+    spotify_ok = _spotify_oauth_configured()
+    providers = {"lastfm": lastfm_ok, "spotify": spotify_ok}
+    if not lastfm_ok and not spotify_ok:
+        return jsonify({
+            "ok": False,
+            "providers": providers,
+            "error": (
+                "No data source is configured. Set LASTFM_API_KEY, the Spotify"
+                " OAuth env vars, or both. See .env.example."
+            ),
+        }), 200
+    return jsonify({"ok": True, "providers": providers})
 
 
 @app.route("/api/ready")
 def ready():
-    """Readiness check — verifies the API key and database are usable."""
-    if not LASTFM_API_KEY or LASTFM_API_KEY == "your_api_key_here":
-        return jsonify({"ok": False, "error": "LASTFM_API_KEY is not set. Copy .env.example to .env and add your key."}), 503
+    """Readiness check — at least one provider configured AND database usable."""
+    lastfm_ok = _lastfm_configured()
+    spotify_ok = _spotify_oauth_configured()
+    providers = {"lastfm": lastfm_ok, "spotify": spotify_ok}
+    if not lastfm_ok and not spotify_ok:
+        return jsonify({
+            "ok": False,
+            "providers": providers,
+            "error": (
+                "No data source is configured. Set LASTFM_API_KEY, the Spotify"
+                " OAuth env vars, or both."
+            ),
+        }), 503
 
     try:
         db.init_db()
     except Exception as exc:
         app.logger.exception("database readiness check failed")
-        return jsonify({"ok": False, "error": f"Database is not ready: {exc}"}), 503
+        return jsonify({
+            "ok": False,
+            "providers": providers,
+            "error": f"Database is not ready: {exc}",
+        }), 503
 
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "providers": providers})
 
 
 @app.route("/api/user/validate")
@@ -1839,6 +1880,11 @@ def validate_user():
     username = request.args.get("username", "").strip()
     if not username:
         return jsonify({"ok": False, "error": "Username is required."}), 400
+    if not _lastfm_configured():
+        return jsonify({
+            "ok": False,
+            "error": "Last.fm is not configured on this server.",
+        }), 200
     try:
         data = lastfm_get("user.getInfo", user=username)
         user = data.get("user", {})
@@ -1874,11 +1920,41 @@ def validate_user():
 
 @app.route("/api/user/top-tracks")
 def user_top_tracks():
-    """Get a user's top tracks for suggestions."""
+    """Get a user's top tracks for suggestions.
+
+    Source resolution:
+      1. If ``profile_id`` is provided (or the request has a Spotify session)
+         the result is computed from imported Spotify history.
+      2. Otherwise falls back to Last.fm ``user.getTopTracks``.
+    """
     username = request.args.get("username", "").strip()
+    profile_id = request.args.get("profile_id", "").strip()
+    if not profile_id:
+        profile_id = _current_spotify_user() or ""
     period = request.args.get("period", "1month")  # overall, 7day, 1month, 3month, 6month, 12month
+
+    if profile_id:
+        try:
+            tracks = db.get_spotify_top_tracks(profile_id, period=period, limit=10)
+            results = [
+                {
+                    "name": t.get("track", ""),
+                    "artist": t.get("artist", ""),
+                    "image": "",
+                    "playcount": int(t.get("playcount", 0)),
+                    "source": "spotify",
+                }
+                for t in tracks
+            ]
+            return jsonify(results)
+        except Exception:
+            app.logger.exception("spotify top-tracks failed for profile_id=%s", profile_id)
+            return jsonify([])
+
     if not username:
-        return jsonify({"error": "username is required"}), 400
+        return jsonify({"error": "username or profile_id is required"}), 400
+    if not _lastfm_configured():
+        return jsonify([])
     try:
         data = lastfm_get("user.getTopTracks", user=username, period=period, limit=10)
         tracks = data.get("toptracks", {}).get("track", [])
@@ -1901,6 +1977,7 @@ def user_top_tracks():
                 "artist": artist_name,
                 "image": image_url,
                 "playcount": int(t.get("playcount", 0)),
+                "source": "lastfm",
             })
         return jsonify(results)
     except Exception:
@@ -1909,10 +1986,44 @@ def user_top_tracks():
 
 @app.route("/api/user/recent-tracks")
 def user_recent_tracks():
-    """Get a user's most recently scrobbled tracks."""
+    """Get a user's most recently scrobbled / played tracks.
+
+    Spotify takes priority when a profile_id is available (live ``spotify_plays``
+    rows are more up-to-date than the imported export window).
+    """
     username = request.args.get("username", "").strip()
+    profile_id = request.args.get("profile_id", "").strip()
+    if not profile_id:
+        profile_id = _current_spotify_user() or ""
+
+    if profile_id:
+        try:
+            rows = db.get_spotify_recent_tracks(profile_id, limit=10)
+            results = []
+            for r in rows:
+                ts = int(r.get("played_at_unix") or 0)
+                if ts:
+                    played = datetime.fromtimestamp(ts, tz=timezone.utc).strftime(
+                        "%d %b %Y, %H:%M"
+                    )
+                else:
+                    played = r.get("played_at", "")
+                results.append({
+                    "name": r.get("track", ""),
+                    "artist": r.get("artist", ""),
+                    "image": "",
+                    "played_at": played,
+                    "source": "spotify",
+                })
+            return jsonify(results)
+        except Exception:
+            app.logger.exception("spotify recent-tracks failed for profile_id=%s", profile_id)
+            return jsonify([])
+
     if not username:
-        return jsonify({"error": "username is required"}), 400
+        return jsonify({"error": "username or profile_id is required"}), 400
+    if not _lastfm_configured():
+        return jsonify([])
     try:
         data = lastfm_get("user.getRecentTracks", user=username, limit=10)
         tracks = data.get("recenttracks", {}).get("track", [])
@@ -1936,6 +2047,7 @@ def user_recent_tracks():
                 "artist": artist_name,
                 "image": image_url,
                 "played_at": played_at,
+                "source": "lastfm",
             })
         return jsonify(results)
     except Exception:
@@ -1944,12 +2056,67 @@ def user_recent_tracks():
 
 @app.route("/api/on-this-day")
 def on_this_day():
-    """Find what the user was listening to on this day 1, 2, 5, and 10 years ago."""
+    """Find what the user listened to on this day 1, 2, 5, and 10 years ago.
+
+    Uses Spotify imported history when a profile_id is available; otherwise
+    falls back to ``user.getRecentTracks`` on Last.fm with a date filter.
+    """
     username = request.args.get("username", "").strip()
-    if not username:
-        return jsonify({"error": "username is required"}), 400
+    profile_id = request.args.get("profile_id", "").strip()
+    if not profile_id:
+        profile_id = _current_spotify_user() or ""
 
     now = datetime.now(timezone.utc)
+
+    if profile_id:
+        periods = []
+        for years_ago in [1, 2, 5, 10]:
+            try:
+                target = now.replace(year=now.year - years_ago)
+            except ValueError:
+                target = now.replace(year=now.year - years_ago, day=28)
+            day_start = target.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=1)
+            try:
+                plays = db.get_spotify_plays_in_range(
+                    profile_id, int(day_start.timestamp()), int(day_end.timestamp())
+                )
+            except Exception:
+                app.logger.exception("spotify on-this-day failed")
+                continue
+            if not plays:
+                continue
+            seen: dict[tuple[str, str], int] = {}
+            track_list: list[dict] = []
+            for p in plays:
+                key = (p.get("track", "").lower(), p.get("artist", "").lower())
+                if key not in seen:
+                    seen[key] = len(track_list)
+                    track_list.append({
+                        "name": p.get("track", ""),
+                        "artist": p.get("artist", ""),
+                        "image": "",
+                        "plays": 1,
+                    })
+                else:
+                    track_list[seen[key]]["plays"] += 1
+            track_list.sort(key=lambda x: x["plays"], reverse=True)
+            top = track_list[:6]
+            if top:
+                periods.append({
+                    "years_ago": years_ago,
+                    "date": day_start.strftime("%B %d, %Y"),
+                    "tracks": top,
+                    "total_scrobbles": len(plays),
+                    "source": "spotify",
+                })
+        return jsonify(periods)
+
+    if not username:
+        return jsonify({"error": "username or profile_id is required"}), 400
+    if not _lastfm_configured():
+        return jsonify([])
+
     periods = []
     for years_ago in [1, 2, 5, 10]:
         try:
@@ -2007,6 +2174,7 @@ def on_this_day():
                     "date": day_start.strftime("%B %d, %Y"),
                     "tracks": top,
                     "total_scrobbles": len(scrobbles),
+                    "source": "lastfm",
                 })
         except Exception:
             continue
@@ -2019,6 +2187,9 @@ def search_tracks():
     """Autocomplete: search Last.fm tracks by name."""
     query = request.args.get("q", "").strip()
     if not query or len(query) < 2:
+        return jsonify([])
+    if not _lastfm_configured():
+        # Spotify-only mode: front-end uses /api/spotify/search instead.
         return jsonify([])
 
     data = lastfm_get("track.search", track=query, limit=8)
@@ -2435,6 +2606,24 @@ def first_listen():
             if not username:
                 # No Last.fm username — Spotify is the only source available.
                 spotify_payload["elapsed_ms"] = elapsed_ms()
+                # Persist to the searches cache (namespaced by profile_id) so
+                # the Spotify-only history view can replay this result.
+                try:
+                    db.save_result(
+                        db.spotify_history_username(profile_id),
+                        spotify_payload["track"],
+                        spotify_payload["artist"],
+                        spotify_payload.get("album", "") or "",
+                        spotify_payload.get("date", "") or "",
+                        spotify_payload.get("timestamp", "") or "",
+                        int(spotify_payload.get("total_scrobbles", 0) or 0),
+                        spotify_payload.get("image", "") or "",
+                    )
+                except Exception:
+                    app.logger.exception(
+                        "failed to persist spotify-only first-listen %s",
+                        lookup_context(profile_id, spotify_payload["artist"], spotify_payload["track"]),
+                    )
                 finish_lookup_progress(
                     lookup_id,
                     profile_id=profile_id,
@@ -2616,6 +2805,8 @@ def artist_image():
     artist = request.args.get("artist", "").strip()
     if not artist:
         return jsonify({"image": ""})
+    if not _lastfm_configured():
+        return jsonify({"image": ""})
     try:
         data = lastfm_get("artist.getInfo", artist=artist)
         images = data.get("artist", {}).get("image", [])
@@ -2647,25 +2838,57 @@ def artist_image():
 
 @app.route("/api/history")
 def history():
-    """Return all previously resolved first-listen results for the configured user."""
+    """Return all previously resolved first-listen results.
+
+    Either ``username`` (Last.fm) or ``profile_id`` (Spotify) may be supplied.
+    Spotify-resolved searches are stored under a namespaced key so they share
+    the same ``searches`` table without colliding with Last.fm usernames.
+    """
     username = request.args.get("username", "").strip()
-    results = db.get_history(username)
-    return jsonify(
-        [
-            {
-                "track": r["track"],
-                "artist": r["artist"],
+    profile_id = request.args.get("profile_id", "").strip()
+    if not profile_id:
+        profile_id = _current_spotify_user() or ""
+
+    combined: list[dict] = []
+    seen_keys: set[tuple[str, str]] = set()
+
+    def _emit(rows, source):
+        for r in rows:
+            track = r["track"]
+            artist = r["artist"]
+            if not track:
+                continue
+            key = (track.casefold(), artist.casefold())
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            combined.append({
+                "track": track,
+                "artist": artist,
                 "album": r["album"] or "",
                 "date": r["first_listen_date"],
                 "timestamp": r["first_listen_timestamp"],
                 "total_scrobbles": r["total_scrobbles"],
                 "image": r["image"] or "",
                 "queried_at": r["queried_at"],
-            }
-            for r in results
-            if r.get("track")
-        ]
-    )
+                "source": source,
+            })
+
+    if profile_id:
+        try:
+            _emit(db.get_history(db.spotify_history_username(profile_id)), "spotify")
+        except Exception:
+            app.logger.exception("spotify history lookup failed")
+    if username:
+        try:
+            _emit(db.get_history(username), "lastfm")
+        except Exception:
+            app.logger.exception("lastfm history lookup failed")
+
+    # Sort by queried_at desc to interleave correctly when both sources
+    # return rows.
+    combined.sort(key=lambda r: r.get("queried_at") or "", reverse=True)
+    return jsonify(combined)
 
 
 @app.route("/api/artist-first-listen")
@@ -2789,22 +3012,72 @@ def _fetch_week_plays(
 def listening_history():
     """Return monthly play counts for a track over the user's scrobble history.
 
-    Uses the Last.fm weekly chart list to identify chart periods, then queries
-    weekly track charts **in parallel** to collect play counts, aggregated by
-    calendar month.  Results are cached for 30 minutes.
+    For Last.fm, uses the Last.fm weekly chart list to identify chart periods,
+    then queries weekly track charts **in parallel** to collect play counts,
+    aggregated by calendar month. For Spotify, aggregates from imported plays.
+    Results are cached for 30 minutes.
     """
     username = request.args.get("username", "").strip()
     track = request.args.get("track", "").strip()
     artist = request.args.get("artist", "").strip()
+    profile_id = request.args.get("profile_id", "").strip()
+    if not profile_id:
+        profile_id = _current_spotify_user() or ""
     months_param = request.args.get("months", "12").strip()
 
-    if not username or not track or not artist:
-        return jsonify({"error": "username, track, and artist are required"}), 400
+    if not track or not artist:
+        return jsonify({"error": "track and artist are required"}), 400
+    if not username and not profile_id:
+        return jsonify({"error": "username or profile_id is required"}), 400
 
     try:
         max_months = min(int(months_param), 36)
     except (ValueError, TypeError):
         max_months = 12
+
+    now = datetime.now(timezone.utc)
+    expected_months = _expected_month_keys(now, max_months)
+
+    # Spotify-first: when a Spotify profile is available, use its plays.
+    if profile_id:
+        cache_key = _listening_history_cache_key(
+            f"spotify:{profile_id}", track, artist, max_months,
+        )
+        with LISTENING_HISTORY_CACHE_LOCK:
+            cached = LISTENING_HISTORY_CACHE.get(cache_key)
+            if cached and time.time() - cached["ts"] < LISTENING_HISTORY_CACHE_TTL_SECONDS:
+                return jsonify(cached["data"])
+
+        cutoff_dt = datetime.strptime(expected_months[0], "%Y-%m").replace(tzinfo=timezone.utc)
+        try:
+            timestamps = db.get_spotify_track_play_timestamps(profile_id, track, artist)
+        except Exception:
+            app.logger.exception("spotify listening history failed")
+            timestamps = []
+
+        month_plays: dict[str, int] = {mk: 0 for mk in expected_months}
+        cutoff_ts = int(cutoff_dt.timestamp())
+        for ts in timestamps:
+            if ts < cutoff_ts:
+                continue
+            mk = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m")
+            if mk in month_plays:
+                month_plays[mk] += 1
+
+        result = []
+        for month_key in expected_months:
+            dt = datetime.strptime(month_key, "%Y-%m")
+            result.append({
+                "month": month_key,
+                "label": dt.strftime("%b %Y"),
+                "plays": month_plays.get(month_key, 0),
+            })
+        with LISTENING_HISTORY_CACHE_LOCK:
+            LISTENING_HISTORY_CACHE[cache_key] = {"data": result, "ts": time.time()}
+        return jsonify(result)
+
+    if not _lastfm_configured():
+        return jsonify([])
 
     # Check cache
     cache_key = _listening_history_cache_key(username, track, artist, max_months)
