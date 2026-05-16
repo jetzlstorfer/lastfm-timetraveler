@@ -138,6 +138,24 @@
       background: rgba(255, 255, 255, 0.07);
     }
 
+    .search-container {
+      position: relative;
+      overflow: visible;
+      padding: 0.85rem;
+      border-radius: 1.35rem;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      background:
+        linear-gradient(165deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.03)),
+        rgba(13, 10, 32, 0.75);
+      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.3);
+      backdrop-filter: blur(12px);
+    }
+
+    .search-container .field-input {
+      background: rgba(255, 255, 255, 0.04);
+      border-color: rgba(255, 255, 255, 0.12);
+    }
+
     .search-clear-btn {
       position: absolute;
       right: 0.875rem;
@@ -218,7 +236,7 @@
       background: rgba(22, 18, 48, 0.98);
       box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
       backdrop-filter: blur(18px);
-      z-index: 100;
+      z-index: 500;
     }
 
     .autocomplete-list.show {
@@ -1198,12 +1216,13 @@
           </div>
         </div>
 
-        <div id="search-section" class="mt-5 show-animate">
-          <div class="search-container relative">
-            <input id="search" class="field-input px-5 py-3 pr-12 text-base sm:text-lg" type="text" placeholder="Search for a song..." autocomplete="off" aria-describedby="search-clear-btn" />
-            <button id="search-clear-btn" class="search-clear-btn" aria-label="Clear search" type="button">&#x2715;</button>
-            <div id="ac-list" class="autocomplete-list"></div>
-          </div>
+      </section>
+
+      <section id="search-section" class="glass-panel relative z-20 mt-5 overflow-visible rounded-[2rem] px-5 py-5 sm:px-7 sm:py-6 show-animate">
+        <div class="search-container relative">
+          <input id="search" class="field-input px-5 py-3 pr-12 text-base sm:text-lg" type="text" placeholder="Search for a song..." autocomplete="off" aria-describedby="search-clear-btn" />
+          <button id="search-clear-btn" class="search-clear-btn" aria-label="Clear search" type="button">&#x2715;</button>
+          <div id="ac-list" class="autocomplete-list"></div>
         </div>
       </section>
 
@@ -2418,7 +2437,7 @@
     async function fetchAutocomplete(query) {
       try {
         const tasks = [];
-        if (currentUsername) {
+        if (lastfmConfigured) {
           tasks.push(fetch(`/api/search?q=${encodeURIComponent(query)}`).then(r => r.json()).catch(() => []));
         }
         if (spotifyLoggedIn) {
@@ -2430,12 +2449,12 @@
           return;
         }
         const results = await Promise.all(tasks);
-        // results[0] = lastfm (if username), results[1] = spotify (if connected)
+        // results[0] = lastfm (if configured), results[1] = spotify (if connected)
         // But order depends on which were added. Recompute:
         let lastfmResults = [];
         let spotifyResults = [];
         let i = 0;
-        if (currentUsername) { lastfmResults = results[i++] || []; }
+        if (lastfmConfigured) { lastfmResults = results[i++] || []; }
         if (spotifyLoggedIn) { spotifyResults = results[i++] || []; }
 
         // Tag sources, dedupe by normalized track+artist (Spotify wins if connected)
