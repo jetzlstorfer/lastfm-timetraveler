@@ -1,4 +1,4 @@
-# 🕰️🧑‍🚀 Last.fm Time Traveler
+# 🕰️🧑‍🚀 Music Time Traveler
 
 Find the very first time you listened to any song — using your **Last.fm scrobbles**, your uploaded **Spotify Extended Streaming History**, or both.
 

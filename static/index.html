@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Last.fm Time Traveler</title>
+  <title>Music Time Traveler</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -1043,7 +1043,7 @@
         <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div class="flex items-center gap-4">
             <span class="text-3xl sm:text-4xl">🧑‍🚀🕰️</span>
-            <a href="/" class="hover:opacity-80 transition-opacity"><h1 class="text-3xl font-bold leading-none sm:text-4xl lg:text-5xl" style="background:linear-gradient(90deg,#d51007,#ff6b6b);background-clip:text;-webkit-background-clip:text;-webkit-text-fill-color:transparent">Last.fm Time Traveler</h1></a>
+            <a href="/" class="hover:opacity-80 transition-opacity"><h1 class="text-3xl font-bold leading-none sm:text-4xl lg:text-5xl" style="background:linear-gradient(90deg,#d51007,#ff6b6b);background-clip:text;-webkit-background-clip:text;-webkit-text-fill-color:transparent">Music Time Traveler</h1></a>
           </div>
           <p class="max-w-lg text-sm leading-6 text-stone-400">
             Find the exact moment a track entered your listening history.
@@ -1061,25 +1061,11 @@
       <!-- Profile & Search -->
       <section class="glass-panel relative z-10 overflow-visible rounded-[2rem] px-5 py-6 sm:px-7 sm:py-7 lg:px-8">
         <div class="mt-2" id="username-section">
-          <div class="flex flex-col gap-3 sm:flex-row" id="username-bar">
-            <input id="username-input" class="field-input flex-1 px-4 py-3 text-base" type="text" placeholder="Enter your Last.fm username..." autocomplete="off" />
-            <button id="connect-btn" class="primary-button px-5 py-3 text-sm sm:min-w-36">Connect</button>
-          </div>
-
-          <div class="user-profile show-animate" id="user-profile">
-            <img id="user-avatar" src="" alt="" />
-            <div class="min-w-0 flex-1">
-              <div class="user-name" id="user-display-name"></div>
-              <div class="user-stats" id="user-stats"></div>
-            </div>
-            <button class="ghost-button px-4 py-2 text-sm font-medium" id="change-user-btn">Change</button>
-          </div>
-
-          <!-- Spotify import: shown alongside the Last.fm input. -->
+          <!-- Spotify import: shown before the Last.fm input. -->
           <div class="mt-4 rounded-2xl border border-white/10 bg-white/5 p-4" id="spotify-card">
             <div class="flex items-center justify-between gap-3 flex-wrap">
               <div>
-                <div class="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-300">Spotify (optional)</div>
+                <div class="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-300">Spotify</div>
                 <div class="mt-1 text-sm text-stone-300">
                   Log in with Spotify to use your listening data alongside Last.fm. Same login on any device.
                 </div>
@@ -1145,6 +1131,20 @@
             </div>
 
             <div id="spotify-error" class="mt-3 hidden rounded-md border border-red-500/40 bg-red-500/10 p-2 text-xs text-red-200" aria-live="polite"></div>
+          </div>
+
+          <div class="mt-4 flex flex-col gap-3 sm:flex-row" id="username-bar">
+            <input id="username-input" class="field-input flex-1 px-4 py-3 text-base" type="text" placeholder="Enter your Last.fm username..." autocomplete="off" />
+            <button id="connect-btn" class="primary-button px-5 py-3 text-sm sm:min-w-36">Connect</button>
+          </div>
+
+          <div class="user-profile show-animate mt-4" id="user-profile">
+            <img id="user-avatar" src="" alt="" />
+            <div class="min-w-0 flex-1">
+              <div class="user-name" id="user-display-name"></div>
+              <div class="user-stats" id="user-stats"></div>
+            </div>
+            <button class="ghost-button px-4 py-2 text-sm font-medium" id="change-user-btn">Change</button>
           </div>
         </div>
 
@@ -1607,7 +1607,43 @@
       return match ? decodeURIComponent(match[2]) : '';
     }
 
+    function applySpotifyCallbackHints() {
+      const params = new URLSearchParams(location.search);
+      let shouldCleanQuery = false;
+
+      const oauthErr = params.get('spotify_error');
+      if (oauthErr) {
+        showSpotifyError(`Spotify login failed: ${oauthErr}`);
+        shouldCleanQuery = true;
+      }
+
+      if (params.get('spotify_logged_in') === '1') {
+        const hinted = {
+          ok: true,
+          logged_in: true,
+          oauth_configured: true,
+          profile_id: params.get('spotify_profile_id') || '',
+          display_name: params.get('spotify_display_name') || params.get('spotify_profile_id') || 'Spotify user',
+          avatar_url: params.get('spotify_avatar_url') || '',
+          has_data: false,
+          stats: null,
+        };
+        applySpotifyStatus(hinted);
+        try {
+          localStorage.setItem('spotify_status_cache', JSON.stringify(hinted));
+        } catch {
+          // Ignore storage failures.
+        }
+        shouldCleanQuery = true;
+      }
+
+      if (shouldCleanQuery) {
+        history.replaceState(null, '', location.pathname);
+      }
+    }
+
     (async () => {
+      applySpotifyCallbackHints();
       // Paint last-known state from local storage / cookies synchronously, so
       // a returning user sees both the Spotify profile and the Last.fm
       // username at the same time — without waiting on the /api/status or
@@ -1643,14 +1679,6 @@
           connectBtn.disabled = true;
         } else {
           configOk = true;
-          // Surface any OAuth error redirected back from /api/spotify/callback.
-          const params = new URLSearchParams(location.search);
-          const oauthErr = params.get('spotify_error');
-          if (oauthErr) {
-            showSpotifyError(`Spotify login failed: ${oauthErr}`);
-            // Strip the query so a refresh doesn't keep showing it.
-            history.replaceState(null, '', location.pathname);
-          }
           if (!savedUsername) {
             // No Last.fm cookie — wait for Spotify status to decide whether
             // to jump straight to search mode (Spotify-only users).
@@ -2170,7 +2198,7 @@
             <div class="otd-period-header">
               <span class="otd-years-badge">${period.years_ago} year${period.years_ago > 1 ? 's' : ''} ago</span>
               <span class="otd-date">${period.date}</span>
-              <span class="otd-total">${period.total_scrobbles >= 50 ? '50+' : period.total_scrobbles} scrobbles that day</span>
+              <span class="otd-total">${period.total_scrobbles >= 50 ? '50+' : period.total_scrobbles} listens that day</span>
             </div>
             <div class="otd-tracks">
               ${period.tracks.map((track) => `

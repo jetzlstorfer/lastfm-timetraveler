@@ -1494,7 +1494,13 @@ def spotify_callback():
         }
     session_id = secrets.token_urlsafe(32)
     db.create_spotify_session(spotify_user_id, session_id)
-    resp = _redirect("/")
+    redirect_url = (
+        f"/?spotify_logged_in=1"
+        f"&spotify_profile_id={quote(spotify_user_id, safe='')}"
+        f"&spotify_display_name={quote((me_json.get('display_name') or spotify_user_id), safe='')}"
+        f"&spotify_avatar_url={quote(avatar_url, safe='')}"
+    )
+    resp = _redirect(redirect_url)
     # HttpOnly so client-side JS can't read it (defense against XSS).
     # SameSite=Lax allows cross-site GET navigation back from accounts.spotify.com.
     resp.set_cookie(
