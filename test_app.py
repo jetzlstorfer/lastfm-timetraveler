@@ -51,6 +51,19 @@ def isolated_db(tmp_path):
         yield db_file
 
 
+@pytest.fixture(autouse=True)
+def default_lastfm_api_key(monkeypatch):
+    """Provide a default LASTFM_API_KEY so Last.fm-only endpoints don't 503.
+
+    Tests that explicitly want the key absent override this with their own
+    ``@patch.object(app_module, "LASTFM_API_KEY", "")`` decorator, which takes
+    precedence because pytest applies decorator patches after the autouse
+    fixture.
+    """
+    monkeypatch.setattr(app_module, "LASTFM_API_KEY", "test-api-key")
+    yield
+
+
 @pytest.fixture
 def client():
     app.config["TESTING"] = True
@@ -1233,6 +1246,7 @@ class TestArtistFirstListenAutoUpdate:
 # ---------------------------------------------------------------------------
 
 import io as _io  # noqa: E402
+from datetime import timedelta as _td  # noqa: E402
 import zipfile  # noqa: E402
 
 # Stable Fernet key for tests (32-byte url-safe base64). The real value comes
@@ -1653,3 +1667,282 @@ class TestSpotifyFirstListen:
         body = resp.get_json()
         assert body["source"] == "spotify"
         assert body["first_listen_track"] == "Track2"
+
+
+# ----- Status / readiness with Spotify-only or no providers -----
+
+
+class TestStatusProviders:
+    @patch.object(app_module, "LASTFM_API_KEY", "")
+    def test_status_ok_with_spotify_only(self, client, spotify_oauth_env):
+        resp = client.get("/api/status")
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["ok"] is True
+        assert data["providers"] == {"lastfm": False, "spotify": True}
+
+    @patch.object(app_module, "LASTFM_API_KEY", "valid_key")
+    def test_status_ok_with_lastfm_only(self, client):
+        resp = client.get("/api/status")
+        data = resp.get_json()
+        assert data["ok"] is True
+        assert data["providers"]["lastfm"] is True
+
+    @patch.object(app_module, "LASTFM_API_KEY", "")
+    @patch.object(app_module, "SPOTIFY_CLIENT_ID", "")
+    @patch.object(app_module, "SPOTIFY_CLIENT_SECRET", "")
+    def test_status_fails_without_any_provider(self, client):
+        resp = client.get("/api/status")
+        data = resp.get_json()
+        assert data["ok"] is False
+        assert data["providers"] == {"lastfm": False, "spotify": False}
+        assert "No data source" in data["error"]
+
+    @patch.object(app_module, "LASTFM_API_KEY", "")
+    def test_ready_ok_with_spotify_only(self, client, spotify_oauth_env):
+        resp = client.get("/api/ready")
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["ok"] is True
+
+    @patch.object(app_module, "LASTFM_API_KEY", "")
+    @patch.object(app_module, "SPOTIFY_CLIENT_ID", "")
+    @patch.object(app_module, "SPOTIFY_CLIENT_SECRET", "")
+    def test_ready_503_without_any_provider(self, client):
+        resp = client.get("/api/ready")
+        assert resp.status_code == 503
+        assert resp.get_json()["ok"] is False
+
+
+# ----- Last.fm-only endpoints degrade gracefully when key is missing -----
+
+
+class TestLastfmEndpointsDegradeWithoutKey:
+    @patch.object(app_module, "LASTFM_API_KEY", "")
+    def test_search_returns_empty_when_lastfm_unconfigured(self, client):
+        resp = client.get("/api/search?q=hey")
+        assert resp.status_code == 200
+        assert resp.get_json() == []
+
+    @patch.object(app_module, "LASTFM_API_KEY", "")
+    def test_user_validate_returns_clean_error(self, client):
+        resp = client.get("/api/user/validate?username=foo")
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["ok"] is False
+        assert "not configured" in body["error"].lower()
+
+    @patch.object(app_module, "LASTFM_API_KEY", "")
+    def test_artist_image_returns_empty(self, client):
+        resp = client.get("/api/artist-image?artist=Foo")
+        assert resp.status_code == 200
+        assert resp.get_json() == {"image": ""}
+
+    @patch.object(app_module, "LASTFM_API_KEY", "")
+    def test_top_tracks_lastfm_returns_empty(self, client):
+        resp = client.get("/api/user/top-tracks?username=foo")
+        assert resp.status_code == 200
+        assert resp.get_json() == []
+
+    @patch.object(app_module, "LASTFM_API_KEY", "")
+    def test_recent_tracks_lastfm_returns_empty(self, client):
+        resp = client.get("/api/user/recent-tracks?username=foo")
+        assert resp.status_code == 200
+        assert resp.get_json() == []
+
+    @patch.object(app_module, "LASTFM_API_KEY", "")
+    def test_on_this_day_lastfm_returns_empty(self, client):
+        resp = client.get("/api/on-this-day?username=foo")
+        assert resp.status_code == 200
+        assert resp.get_json() == []
+
+    @patch.object(app_module, "LASTFM_API_KEY", "")
+    def test_listening_history_lastfm_returns_empty(self, client):
+        resp = client.get("/api/listening-history?username=foo&track=t&artist=a")
+        assert resp.status_code == 200
+        assert resp.get_json() == []
+
+
+# ----- Spotify equivalents of every Last.fm-only widget -----
+
+
+class TestSpotifyTopTracks:
+    def test_returns_top_tracks_from_imported_plays(self, client, spotify_oauth_env):
+        _login_spotify(client, "topper")
+        # Two plays of "Hit", one play of "Filler" — Hit should rank first.
+        # Use distinct timestamps within the last 30 days so they fall in the
+        # default 1-month window AND survive the (profile, played_at, track,
+        # artist) dedup index.
+        from datetime import datetime as _dt, timezone as _tz
+        now = _dt.now(_tz.utc)
+        recent_a = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        recent_b = (now - _td(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        recent_c = (now - _td(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _spotify_upload(client, [
+            _spotify_entry(recent_a, track="Hit", artist="Band"),
+            _spotify_entry(recent_b, track="Hit", artist="Band"),
+            _spotify_entry(recent_c, track="Filler", artist="Band"),
+        ])
+        resp = client.get(
+            f"/api/user/top-tracks?profile_id=topper&period=1month"
+        )
+        assert resp.status_code == 200
+        items = resp.get_json()
+        assert len(items) >= 2
+        assert items[0]["name"] == "Hit"
+        assert items[0]["playcount"] == 2
+        assert items[0]["source"] == "spotify"
+
+    def test_session_cookie_is_sufficient(self, client, spotify_oauth_env):
+        _login_spotify(client, "cookietopper")
+        from datetime import datetime as _dt, timezone as _tz
+        recent = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _spotify_upload(client, [
+            _spotify_entry(recent, track="Solo", artist="Band"),
+        ])
+        # No profile_id query arg — the session cookie should drive it.
+        resp = client.get("/api/user/top-tracks?period=1month")
+        assert resp.status_code == 200
+        items = resp.get_json()
+        assert items and items[0]["name"] == "Solo"
+
+    def test_overall_period_includes_old_plays(self, client, spotify_oauth_env):
+        _login_spotify(client, "overallu")
+        _spotify_upload(client, [
+            _spotify_entry("2010-01-01T00:00:00Z", track="Old", artist="Band"),
+            _spotify_entry("2010-01-02T00:00:00Z", track="Old", artist="Band"),
+        ])
+        resp = client.get(
+            "/api/user/top-tracks?profile_id=overallu&period=overall"
+        )
+        items = resp.get_json()
+        assert items and items[0]["name"] == "Old"
+        assert items[0]["playcount"] == 2
+
+
+class TestSpotifyRecentTracks:
+    def test_returns_most_recent_first(self, client, spotify_oauth_env):
+        _login_spotify(client, "recenter")
+        _spotify_upload(client, [
+            _spotify_entry("2018-08-08T20:00:00Z", track="New", artist="Band"),
+            _spotify_entry("2010-03-04T08:00:00Z", track="Old", artist="Band"),
+        ])
+        resp = client.get("/api/user/recent-tracks?profile_id=recenter")
+        assert resp.status_code == 200
+        items = resp.get_json()
+        assert items[0]["name"] == "New"
+        assert items[1]["name"] == "Old"
+        assert all(it["source"] == "spotify" for it in items)
+
+
+class TestSpotifyOnThisDay:
+    def test_returns_plays_from_same_calendar_day_in_past(self, client, spotify_oauth_env):
+        _login_spotify(client, "otd")
+        # Use today's date but one and two years ago.
+        from datetime import datetime as _dt, timezone as _tz
+        now = _dt.now(_tz.utc)
+        try:
+            one_year_ago = now.replace(year=now.year - 1, hour=12, minute=0, second=0, microsecond=0)
+        except ValueError:
+            one_year_ago = now.replace(year=now.year - 1, day=28, hour=12, minute=0, second=0, microsecond=0)
+        try:
+            two_years_ago = now.replace(year=now.year - 2, hour=12, minute=0, second=0, microsecond=0)
+        except ValueError:
+            two_years_ago = now.replace(year=now.year - 2, day=28, hour=12, minute=0, second=0, microsecond=0)
+        ts1a = one_year_ago.strftime("%Y-%m-%dT%H:%M:%SZ")
+        ts1b = (one_year_ago + _td(seconds=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ts2 = two_years_ago.strftime("%Y-%m-%dT%H:%M:%SZ")
+        _spotify_upload(client, [
+            _spotify_entry(ts1a, track="A", artist="Band"),
+            _spotify_entry(ts1b, track="A", artist="Band"),
+            _spotify_entry(ts2, track="B", artist="Band"),
+        ])
+        resp = client.get("/api/on-this-day?profile_id=otd")
+        assert resp.status_code == 200
+        periods = resp.get_json()
+        years = {p["years_ago"] for p in periods}
+        assert 1 in years
+        assert 2 in years
+        # The 1-year-ago period should have 2 total plays of "A".
+        one = next(p for p in periods if p["years_ago"] == 1)
+        assert one["total_scrobbles"] == 2
+        assert one["tracks"][0]["name"] == "A"
+        assert one["tracks"][0]["plays"] == 2
+        assert one["source"] == "spotify"
+
+
+class TestSpotifyHistory:
+    def test_first_listen_persists_to_history(self, client, spotify_oauth_env):
+        _login_spotify(client, "histu")
+        _spotify_upload(client, [
+            _spotify_entry("2010-01-01T00:00:00Z", track="Hist Track", artist="Hist Artist"),
+        ])
+        # Resolve a first-listen — this should write to the searches cache.
+        resp = client.get("/api/first-listen?track=Hist+Track&artist=Hist+Artist")
+        assert resp.status_code == 200
+        # Now /api/history should expose it.
+        resp = client.get("/api/history?profile_id=histu")
+        assert resp.status_code == 200
+        items = resp.get_json()
+        assert any(
+            it["track"] == "Hist Track" and it["artist"] == "Hist Artist"
+            and it["source"] == "spotify"
+            for it in items
+        )
+
+    def test_history_is_namespaced_per_profile(self, client, spotify_oauth_env):
+        # User A resolves a track; user B should not see it.
+        _login_spotify(client, "alice_h")
+        _spotify_upload(client, [
+            _spotify_entry("2011-01-01T00:00:00Z", track="A Song", artist="A Band"),
+        ])
+        client.get("/api/first-listen?track=A+Song&artist=A+Band")
+        client.post("/api/spotify/logout")
+
+        _login_spotify(client, "bob_h")
+        resp = client.get("/api/history?profile_id=bob_h")
+        items = resp.get_json()
+        assert all(it["track"] != "A Song" for it in items)
+
+
+class TestSpotifyListeningHistory:
+    def test_returns_monthly_play_counts(self, client, spotify_oauth_env):
+        _login_spotify(client, "lhuser")
+        from datetime import datetime as _dt, timezone as _tz
+        now = _dt.now(_tz.utc)
+        # Two plays this month (distinct timestamps to survive dedup), one last month.
+        this_month_a = now.strftime("%Y-%m-%dT12:00:00Z")
+        this_month_b = now.strftime("%Y-%m-%dT12:00:30Z")
+        last_month = (now.replace(day=1) - _td(days=1)).strftime("%Y-%m-15T12:00:00Z")
+        _spotify_upload(client, [
+            _spotify_entry(this_month_a, track="T", artist="A"),
+            _spotify_entry(this_month_b, track="T", artist="A"),
+            _spotify_entry(last_month, track="T", artist="A"),
+        ])
+        resp = client.get(
+            "/api/listening-history?profile_id=lhuser&track=T&artist=A&months=12"
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, list)
+        # Find this month's bucket.
+        this_key = now.strftime("%Y-%m")
+        match = next((d for d in data if d["month"] == this_key), None)
+        assert match is not None and match["plays"] == 2
+
+    def test_works_without_lastfm_username(self, client, spotify_oauth_env):
+        # When only profile_id is provided, no username/Last.fm needed.
+        _login_spotify(client, "lhuser2")
+        _spotify_upload(client, [
+            _spotify_entry("2024-01-15T12:00:00Z", track="X", artist="Y"),
+        ])
+        # No username supplied — should still succeed.
+        with patch.object(app_module, "LASTFM_API_KEY", ""):
+            resp = client.get(
+                "/api/listening-history?profile_id=lhuser2&track=X&artist=Y&months=12"
+            )
+        assert resp.status_code == 200
+        assert isinstance(resp.get_json(), list)
+
+
+# Imports used by the listening-history test above.

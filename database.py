@@ -1460,6 +1460,252 @@ def search_spotify_tracks(profile_id: str, query: str, limit: int = 20) -> list[
     return [dict(r) for r in rows]
 
 
+SPOTIFY_HISTORY_USERNAME_PREFIX = "spotify:"
+
+
+def spotify_history_username(profile_id: str) -> str:
+    """Namespaced username key used to store Spotify-resolved first-listens.
+
+    The ``searches`` cache table is keyed by ``username``; using a prefix here
+    lets a Spotify profile share that cache without colliding with any
+    Last.fm username. The prefix is opaque to callers — they pass the bare
+    profile id and we round-trip it through this helper.
+    """
+    return f"{SPOTIFY_HISTORY_USERNAME_PREFIX}{profile_id}"
+
+
+# ---- Aggregate queries over imported Spotify plays --------------------------
+
+# Period -> seconds back from now. Mirrors Last.fm's user.getTopTracks
+# `period` parameter so the front-end can use the same control for both
+# sources.
+_SPOTIFY_PERIOD_SECONDS: dict[str, int | None] = {
+    "7day": 7 * 24 * 60 * 60,
+    "1month": 30 * 24 * 60 * 60,
+    "3month": 90 * 24 * 60 * 60,
+    "6month": 180 * 24 * 60 * 60,
+    "12month": 365 * 24 * 60 * 60,
+    "overall": None,
+}
+
+
+def _spotify_period_cutoff_unix(period: str) -> int:
+    """Return the unix timestamp cutoff for *period*, or 0 for 'overall'.
+
+    Unknown period values fall back to the same default as Last.fm
+    (``1month``) rather than raising — this matches the behaviour of the
+    existing Last.fm endpoints which silently accept any period and let the
+    upstream API decide.
+    """
+    seconds = _SPOTIFY_PERIOD_SECONDS.get(period, _SPOTIFY_PERIOD_SECONDS["1month"])
+    if seconds is None:
+        return 0
+    return int(datetime.now(timezone.utc).timestamp()) - int(seconds)
+
+
+def get_spotify_top_tracks(profile_id: str, period: str = "1month", limit: int = 10) -> list[dict]:
+    """Return the user's most-played tracks within *period*, newest first.
+
+    Each row contains ``track``, ``artist``, ``album`` and ``playcount``.
+    """
+    cutoff = _spotify_period_cutoff_unix(period)
+    if _use_cosmos_backend():
+        container = _spotify_plays_container()
+        normalized = _normalize_lookup_value(profile_id)
+        if cutoff > 0:
+            query = (
+                "SELECT c.track, c.artist, c.album, c.track_normalized, "
+                "c.artist_normalized FROM c "
+                "WHERE c.profile_id_normalized = @p "
+                "AND c.played_at_unix >= @cutoff"
+            )
+            params = [
+                {"name": "@p", "value": normalized},
+                {"name": "@cutoff", "value": int(cutoff)},
+            ]
+        else:
+            query = (
+                "SELECT c.track, c.artist, c.album, c.track_normalized, "
+                "c.artist_normalized FROM c "
+                "WHERE c.profile_id_normalized = @p"
+            )
+            params = [{"name": "@p", "value": normalized}]
+        items = list(container.query_items(
+            query=query, parameters=params, partition_key=normalized,
+        ))
+        agg: dict[tuple[str, str], dict] = {}
+        for it in items:
+            key = (it.get("track_normalized", ""), it.get("artist_normalized", ""))
+            existing = agg.get(key)
+            if existing is None:
+                agg[key] = {
+                    "track": it.get("track", ""),
+                    "artist": it.get("artist", ""),
+                    "album": it.get("album", ""),
+                    "playcount": 1,
+                }
+            else:
+                existing["playcount"] += 1
+        ranked = sorted(agg.values(), key=lambda d: d["playcount"], reverse=True)
+        return ranked[: int(limit)]
+
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        if cutoff > 0:
+            rows = conn.execute(
+                """
+                SELECT track, artist, MAX(album) AS album, COUNT(*) AS playcount
+                FROM spotify_history
+                WHERE LOWER(profile_id) = LOWER(?)
+                  AND played_at_unix >= ?
+                GROUP BY LOWER(track), LOWER(artist)
+                ORDER BY playcount DESC, MAX(played_at_unix) DESC
+                LIMIT ?
+                """,
+                (profile_id, int(cutoff), int(limit)),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT track, artist, MAX(album) AS album, COUNT(*) AS playcount
+                FROM spotify_history
+                WHERE LOWER(profile_id) = LOWER(?)
+                GROUP BY LOWER(track), LOWER(artist)
+                ORDER BY playcount DESC, MAX(played_at_unix) DESC
+                LIMIT ?
+                """,
+                (profile_id, int(limit)),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_spotify_recent_tracks(profile_id: str, limit: int = 10) -> list[dict]:
+    """Return the most recently played tracks for *profile_id*."""
+    if _use_cosmos_backend():
+        container = _spotify_plays_container()
+        normalized = _normalize_lookup_value(profile_id)
+        items = list(container.query_items(
+            query=(
+                "SELECT c.track, c.artist, c.album, c.played_at, c.played_at_unix "
+                "FROM c WHERE c.profile_id_normalized = @p "
+                "ORDER BY c.played_at_unix DESC OFFSET 0 LIMIT @lim"
+            ),
+            parameters=[
+                {"name": "@p", "value": normalized},
+                {"name": "@lim", "value": int(limit)},
+            ],
+            partition_key=normalized,
+        ))
+        return [
+            {
+                "track": it.get("track", ""),
+                "artist": it.get("artist", ""),
+                "album": it.get("album", ""),
+                "played_at": it.get("played_at", ""),
+                "played_at_unix": int(it.get("played_at_unix") or 0),
+            }
+            for it in items
+        ]
+
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT track, artist, album, played_at, played_at_unix
+            FROM spotify_history
+            WHERE LOWER(profile_id) = LOWER(?)
+            ORDER BY played_at_unix DESC
+            LIMIT ?
+            """,
+            (profile_id, int(limit)),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_spotify_plays_in_range(profile_id: str, from_unix: int, to_unix: int) -> list[dict]:
+    """Return all plays for *profile_id* between *from_unix* and *to_unix* (inclusive lower, exclusive upper)."""
+    if _use_cosmos_backend():
+        container = _spotify_plays_container()
+        normalized = _normalize_lookup_value(profile_id)
+        items = list(container.query_items(
+            query=(
+                "SELECT c.track, c.artist, c.album, c.played_at, c.played_at_unix "
+                "FROM c WHERE c.profile_id_normalized = @p "
+                "AND c.played_at_unix >= @f AND c.played_at_unix < @t "
+                "ORDER BY c.played_at_unix ASC"
+            ),
+            parameters=[
+                {"name": "@p", "value": normalized},
+                {"name": "@f", "value": int(from_unix)},
+                {"name": "@t", "value": int(to_unix)},
+            ],
+            partition_key=normalized,
+        ))
+        return [
+            {
+                "track": it.get("track", ""),
+                "artist": it.get("artist", ""),
+                "album": it.get("album", ""),
+                "played_at": it.get("played_at", ""),
+                "played_at_unix": int(it.get("played_at_unix") or 0),
+            }
+            for it in items
+        ]
+
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT track, artist, album, played_at, played_at_unix
+            FROM spotify_history
+            WHERE LOWER(profile_id) = LOWER(?)
+              AND played_at_unix >= ? AND played_at_unix < ?
+            ORDER BY played_at_unix ASC
+            """,
+            (profile_id, int(from_unix), int(to_unix)),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_spotify_track_play_timestamps(
+    profile_id: str, track: str, artist: str
+) -> list[int]:
+    """Return every play timestamp (unix seconds) for *(track, artist)*, ascending."""
+    if _use_cosmos_backend():
+        container = _spotify_plays_container()
+        normalized = _normalize_lookup_value(profile_id)
+        items = list(container.query_items(
+            query=(
+                "SELECT c.played_at_unix FROM c "
+                "WHERE c.profile_id_normalized = @p "
+                "AND c.track_normalized = @t AND c.artist_normalized = @a "
+                "ORDER BY c.played_at_unix ASC"
+            ),
+            parameters=[
+                {"name": "@p", "value": normalized},
+                {"name": "@t", "value": _normalize_lookup_value(track)},
+                {"name": "@a", "value": _normalize_lookup_value(artist)},
+            ],
+            partition_key=normalized,
+        ))
+        return [int(it.get("played_at_unix") or 0) for it in items]
+
+    _sqlite_init_db()
+    with _sqlite_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT played_at_unix
+            FROM spotify_history
+            WHERE LOWER(profile_id) = LOWER(?)
+              AND LOWER(track)      = LOWER(?)
+              AND LOWER(artist)     = LOWER(?)
+            ORDER BY played_at_unix ASC
+            """,
+            (profile_id, track, artist),
+        ).fetchall()
+    return [int(r["played_at_unix"]) for r in rows]
+
+
 def get_spotify_stats(profile_id: str) -> dict:
     if _use_cosmos_backend():
         container = _spotify_plays_container()

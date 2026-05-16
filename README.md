@@ -8,6 +8,7 @@ Connect either source (or both), type a song title, pick from the autocomplete s
 
 ## What's new
 
+- 🟢 **Spotify is a first-class data source** — log in with Spotify and you get **the full app**: search, first-listen lookup, top tracks, recent plays, on-this-day, search history, and per-month listening trends — all driven by your imported Spotify history. Last.fm is fully optional.
 - 🔐 **Log in with Spotify** — sign in via the Spotify OAuth flow (Authorization Code + PKCE). Your Spotify user id is your identity, so the same account on phone and desktop sees the same data. No passwords, no share links.
 - 🎧 **Spotify import** — upload your Spotify Extended Streaming History (`.json` files or the raw `.zip`) and the app uses your private play data as the **primary** source for first-listen lookups (instant, no API rate limits, complete history back to your first play).
 - 🔄 **One-click sync** — once logged in, click **Sync** to pull your last 50 plays from Spotify's `recently-played` API and append them to your imported history.
@@ -45,7 +46,17 @@ The same `database.py` API is used regardless of backend. Backend selection is a
 
 ## Setup
 
-1. **Get a Last.fm API key** at https://www.last.fm/api/account/create (only required for Last.fm features; Spotify-only mode works without one for searches over your imported data).
+The app supports three configuration modes:
+
+| Mode | Provides |
+|---|---|
+| **Last.fm only** (set `LASTFM_API_KEY`) | Last.fm-driven search, first-listen, top tracks, on-this-day, etc. |
+| **Spotify only** (set the four `SPOTIFY_*` vars) | Same features as above, but driven entirely by your imported Spotify history. No Last.fm key required. |
+| **Both** | Spotify takes priority for first-listen and search. The Last.fm widgets remain available. |
+
+The `/api/status` and `/api/ready` health endpoints are healthy as long as **at least one** of the two providers is configured.
+
+1. **Get a Last.fm API key** at https://www.last.fm/api/account/create *(optional — only needed for Last.fm features. Spotify-only deployments can skip this entirely.)*
 
 2. **Configure environment**:
    ```bash
