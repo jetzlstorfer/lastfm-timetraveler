@@ -41,8 +41,11 @@ var cosmosContainerName = 'searches'
 
 // Container Apps rejects secrets with empty values. Only include the Spotify
 // secrets/env vars when the caller actually provided them, so `azd up` works
-// even before the user registers a Spotify OAuth app.
+// even before the user registers a Spotify OAuth app. Same for Last.fm: the
+// app supports Spotify-only deployments, so an empty LASTFM_API_KEY must not
+// fail provisioning.
 var spotifyConfigured = !empty(spotifyClientId) && !empty(spotifyClientSecret) && !empty(spotifyRedirectUri) && !empty(spotifyTokenEncryptionKey)
+var lastfmConfigured = !empty(lastfmApiKey)
 
 // ---------------------------------------------------------------------------
 // Log Analytics Workspace (required by Container Apps Environment)
@@ -253,14 +256,15 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           value: acr.listCredentials().passwords[0].value
         }
         {
-          name: 'lastfm-api-key'
-          value: lastfmApiKey
-        }
-        {
           name: 'cosmos-connection-string'
           value: cosmosAccount.listConnectionStrings().connectionStrings[0].connectionString
         }
-      ], spotifyConfigured ? [
+      ], lastfmConfigured ? [
+        {
+          name: 'lastfm-api-key'
+          value: lastfmApiKey
+        }
+      ] : [], spotifyConfigured ? [
         {
           name: 'spotify-client-secret'
           value: spotifyClientSecret
@@ -279,10 +283,6 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           image: 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
           env: concat([
             {
-              name: 'LASTFM_API_KEY'
-              secretRef: 'lastfm-api-key'
-            }
-            {
               name: 'COSMOS_CONNECTION_STRING'
               secretRef: 'cosmos-connection-string'
             }
@@ -294,7 +294,12 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
               name: 'COSMOS_CONTAINER_NAME'
               value: cosmosContainerName
             }
-          ], spotifyConfigured ? [
+          ], lastfmConfigured ? [
+            {
+              name: 'LASTFM_API_KEY'
+              secretRef: 'lastfm-api-key'
+            }
+          ] : [], spotifyConfigured ? [
             {
               name: 'SPOTIFY_CLIENT_ID'
               value: spotifyClientId
