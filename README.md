@@ -1,18 +1,19 @@
 # 🕰️🧑‍🚀 Music Time Traveler
 
-Find the very first time you listened to any song — using your **Last.fm scrobbles**, your uploaded **Spotify Extended Streaming History**, or both.
+Find the very first time you listened to any song — powered by your **Spotify Extended Streaming History** (recommended), your **Last.fm scrobbles**, or both.
 
-Connect either source (or both), type a song title, pick from the autocomplete suggestions, and discover when you first played it, plus how many times since.
+Log in with Spotify (or connect Last.fm), type a song title, pick from the autocomplete suggestions, and discover when you first played it, plus how many times since.
 
 ![Python](https://img.shields.io/badge/Python-Flask-blue)
 
 ## What's new
 
-- 🟢 **Spotify is a first-class data source** — log in with Spotify and you get **the full app**: search, first-listen lookup, top tracks, recent plays, on-this-day, search history, and per-month listening trends — all driven by your imported Spotify history. Last.fm is fully optional.
+- 🟢 **Spotify is the preferred data source** — log in with Spotify and you get **the full app**: search, first-listen lookup, top tracks, recent plays, on-this-day, search history, and per-month listening trends — all driven by your imported Spotify history. Spotify wins because it's **instant** (single partition-keyed lookup, no API rate limits) and **complete** (every play back to account creation). Last.fm is fully optional.
 - 🔐 **Log in with Spotify** — sign in via the Spotify OAuth flow (Authorization Code + PKCE). Your Spotify user id is your identity, so the same account on phone and desktop sees the same data. No passwords, no share links.
 - 🎧 **Spotify import** — upload your Spotify Extended Streaming History (`.json` files or the raw `.zip`) and the app uses your private play data as the **primary** source for first-listen lookups (instant, no API rate limits, complete history back to your first play).
 - 🔄 **One-click sync** — once logged in, click **Sync** to pull your last 50 plays from Spotify's `recently-played` API and append them to your imported history.
-- 🪞 **Dual-source search** — log into Spotify, connect Last.fm, or both. When both are connected, autocomplete merges results and Spotify takes priority (because it's faster and more complete).
+- 🪞 **Dual-source search** — log into Spotify, connect Last.fm, or both. When both are connected, autocomplete merges results and **Spotify takes priority** (because it's faster and more complete).
+- 🎵 **Last.fm (optional, legacy)** — if you've been scrobbling for years and don't have a Spotify export, you can still drive the whole app from a Last.fm username alone.
 
 ## Architecture
 
@@ -30,16 +31,20 @@ flowchart LR
     cosmos[("Azure Cosmos DB<br/>searches / spotify_profiles / spotify_plays / spotify_sessions")]
   end
 
-  lastfm[("Last.fm API<br/>+ public library HTML")]
+  spotify[("🟢 Spotify Web API<br/>+ Extended Streaming History<br/>(preferred source)")]
+  lastfm[("Last.fm API<br/>+ public library HTML<br/>(optional, legacy)")]
 
   user -->|HTTPS| api
   api --> db
   db -.->|"if no Cosmos<br/>credentials"| sqlite
   db -.->|"if Cosmos env vars set"| cosmos
+  api ==>|"OAuth login<br/>recently-played<br/>history import"| spotify
   api -->|"track.getInfo<br/>user.getRecentTracks<br/>library scrape"| lastfm
 
   classDef store fill:#1f2937,stroke:#10b981,color:#e5e7eb
+  classDef primary fill:#064e3b,stroke:#10b981,color:#d1fae5
   class sqlite,cosmos store
+  class spotify primary
 ```
 
 The same `database.py` API is used regardless of backend. Backend selection is automatic based on environment variables (see [Database](#database)).
@@ -50,18 +55,20 @@ The app supports three configuration modes:
 
 | Mode | Provides |
 |---|---|
-| **Last.fm only** (set `LASTFM_API_KEY`) | Last.fm-driven search, first-listen, top tracks, on-this-day, etc. |
-| **Spotify only** (set the four `SPOTIFY_*` vars) | Same features as above, but driven entirely by your imported Spotify history. No Last.fm key required. |
-| **Both** | Spotify takes priority for first-listen and search. The Last.fm widgets remain available. |
+| **Spotify only** *(recommended — set the four `SPOTIFY_*` vars)* | The full app driven entirely by your imported Spotify history: search, first-listen, top tracks, on-this-day, etc. Instant lookups, complete history. No Last.fm key required. |
+| **Both** | Spotify takes priority for first-listen and search. The Last.fm widgets remain available as a secondary source. |
+| **Last.fm only** (set `LASTFM_API_KEY`) | Legacy mode for users with long Last.fm scrobble histories but no Spotify export. |
 
 The `/api/status` and `/api/ready` health endpoints are healthy as long as **at least one** of the two providers is configured.
 
-1. **Get a Last.fm API key** at https://www.last.fm/api/account/create *(optional — only needed for Last.fm features. Spotify-only deployments can skip this entirely.)*
+1. **Set up Spotify** *(recommended)* — see [Setting up Spotify OAuth](#setting-up-spotify-oauth) below. This is the preferred path: instant lookups, full history, no rate limits.
 
-2. **Configure environment**:
+2. **Get a Last.fm API key** at https://www.last.fm/api/account/create *(optional — only needed if you want the Last.fm widgets or are running in Last.fm-only mode. Spotify-only deployments can skip this entirely.)*
+
+3. **Configure environment**:
    ```bash
    cp .env.example .env
-   # Edit .env with your API key
+   # Edit .env with your Spotify credentials and/or Last.fm API key
    ```
 
    Optional settings:
@@ -72,7 +79,7 @@ The `/api/status` and `/api/ready` health endpoints are healthy as long as **at 
    - `SPOTIFY_BULK_INSERT_WORKERS` — parallelism when bulk-inserting Spotify plays into Cosmos (default: `16`).
    - `SPOTIFY_TOUCH_INTERVAL_SECONDS` — minimum interval between profile-TTL refresh writes on Cosmos (default: `3600`, i.e. once per hour). See [Data retention](#data-retention).
 
-3. **Install & run**:
+4. **Install & run**:
    ```bash
    python -m venv .venv
    source .venv/bin/activate   # Windows: .venv\Scripts\activate
@@ -80,7 +87,7 @@ The `/api/status` and `/api/ready` health endpoints are healthy as long as **at 
    python app.py
    ```
 
-4. Open http://localhost:5000
+5. Open http://localhost:5000
 
 ### Dev Container
 
@@ -153,12 +160,12 @@ The local SQLite backend has no expiry — data lives until you delete the file 
 
 ```mermaid
 flowchart TD
-  start([User searches for a track]) --> spotify_check{Spotify<br/>connected?}
+  start([User searches for a track]) --> spotify_check{Spotify<br/>connected?<br/>⭐ preferred}
   spotify_check -- yes --> spotify_q[Query spotify_plays<br/>partition = profile_id]
   spotify_q --> spotify_hit{Found?}
-  spotify_hit -- yes --> done_spotify(["Return result<br/>source: spotify ⚡<br/>(instant)"])
+  spotify_hit -- yes --> done_spotify(["Return result<br/>source: spotify ⚡<br/>(instant, complete)"])
   spotify_hit -- no --> lastfm_check
-  spotify_check -- no --> lastfm_check{Last.fm<br/>connected?}
+  spotify_check -- no --> lastfm_check{Last.fm<br/>connected?<br/>(fallback)}
   lastfm_check -- yes --> cache[Check Last.fm cache]
   cache --> cache_hit{Cached?}
   cache_hit -- yes --> done_cache([Return cached result])
@@ -306,12 +313,12 @@ To set up federated credentials (OIDC) for the service principal, follow the [az
 
 ## How it works
 
-- **Autocomplete** — calls Last.fm's `track.search` and/or `/api/spotify/search` (your imported plays) in parallel; results are merged with Spotify hits taking priority.
-- **First listen (Last.fm)** — `track.getInfo` for play count, then a public-library HTML scrape for the oldest scrobble; falls back to scanning `user.getRecentTracks` pages backward.
-- **First listen (Spotify)** — single partition-keyed Cosmos query (or indexed SQLite lookup): `MIN(played_at_unix)` for `(profile_id, track, artist)`. Always instant.
+- **Autocomplete** — calls `/api/spotify/search` (your imported plays) and/or Last.fm's `track.search` in parallel; results are merged with **Spotify hits taking priority**.
+- **First listen (Spotify, preferred)** — single partition-keyed Cosmos query (or indexed SQLite lookup): `MIN(played_at_unix)` for `(profile_id, track, artist)`. Always instant, no API rate limits, complete history.
+- **First listen (Last.fm, fallback)** — `track.getInfo` for play count, then a public-library HTML scrape for the oldest scrobble; falls back to scanning `user.getRecentTracks` pages backward.
 - **Async lookups** — `/api/first-listen` returns `202` with a `lookup_id`; the client polls `/api/lookup-progress?lookup_id=` for status. Progress lives in an in-memory dict, not the database.
 - **Scrape resilience** — public Last.fm HTML page fetches use retry/backoff for transient failures (timeouts, connection errors, `429`, `5xx`).
-- **Caching** — confirmed Last.fm lookups are written to the `searches` container/table.
+- **Caching** — confirmed Last.fm lookups are written to the `searches` container/table. Spotify lookups don't need a cache — they're already instant.
 - Built with **Flask** (backend) and vanilla **HTML/CSS/JS** (frontend, single file: [`static/index.html`](static/index.html)).
 
 ### Endpoints
