@@ -1219,7 +1219,13 @@
       </section>
 
       <section id="search-section" class="glass-panel relative z-20 mt-5 overflow-visible rounded-[2rem] px-5 py-5 sm:px-7 sm:py-6 show-animate">
-        <div class="search-container relative">
+        <div class="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div class="section-eyebrow text-xs font-semibold uppercase tracking-[0.16em]">Explore</div>
+            <div class="section-title mt-2">🔍 Search in your library</div>
+          </div>
+        </div>
+        <div class="relative">
           <input id="search" class="field-input px-5 py-3 pr-12 text-base sm:text-lg" type="text" placeholder="Search for a song..." autocomplete="off" aria-describedby="search-clear-btn" />
           <button id="search-clear-btn" class="search-clear-btn" aria-label="Clear search" type="button">&#x2715;</button>
           <div id="ac-list" class="autocomplete-list"></div>
